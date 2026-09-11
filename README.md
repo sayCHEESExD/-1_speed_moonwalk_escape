@@ -195,6 +195,55 @@ than a trigger box, why there is no checkpoint system — are written down in
 ## Deployment
 
 The client is static and the server is a long-lived Node process, so they go to
-two different hosts. Set `VITE_SERVER_URL` to the Colyseus endpoint at client
-**build** time — it is baked in, and it is the only client-side configuration
-there is.
+two different places. `VITE_SERVER_URL` is baked into the client at **build**
+time and is the only client-side configuration there is.
+
+### Bloxity Hosting (automatic)
+
+Pushing deploys. `.github/workflows/deploy.yml` builds both halves and publishes
+them:
+
+| Branch          | Channel | Backend                                       | Frontend                                       |
+| --------------- | ------- | --------------------------------------------- | ---------------------------------------------- |
+| `dev`           | `dev`   | `wss://speed-moonwalk-escape.dev.host.bloxity.io` | `https://speed-moonwalk-escape.dev.play.bloxity.io` |
+| `main`/`master` | `prod`  | `wss://speed-moonwalk-escape.host.bloxity.io`     | `https://speed-moonwalk-escape.play.bloxity.io`     |
+
+Note the convention: **`.dev.` is the dev channel and the bare host is prod.**
+Getting that backwards points test players at the live server, which nobody
+notices until test progress turns up on the production leaderboard.
+
+The server is built by [`Dockerfile`](Dockerfile) into a GHCR image tagged
+`<channel>-<sha>` and rolled by the Legion control plane; the client is zipped
+with `index.html` at the archive root and uploaded to Bloxity Hosting. The
+commit SHA is the deployment version for both halves, so a frontend and a
+backend from the same push are identifiable as a pair.
+
+Both API routes were verified against the live service before being used — each
+answers `401` without a token while a deliberately wrong sibling path answers
+`404`, so neither is a guess.
+
+**One secret is required:** `LEGION_DEPLOY_TOKEN`, under
+*Settings → Secrets and variables → Actions*. Copy it from *My Games* on
+hosting.bloxity.io. Nothing else needs configuring — the API hosts and the
+per-channel URLs all have working defaults, and the optional repository
+variables `LEGION_API_BASE`, `HOSTING_API_BASE`, `SERVER_URL_DEV` and
+`SERVER_URL_PROD` exist only so a change on Bloxity's side stays a settings
+edit rather than a commit.
+
+`workflow_dispatch` runs the same pipeline against a channel you pick, for
+re-publishing without a push.
+
+### A caveat about persistence
+
+Player profiles are a JSON file behind `PersistenceAdapter`. Legion scales a
+pod to zero when the last player leaves, and the container filesystem goes with
+it — so on Bloxity, progression currently lasts only as long as a pod does.
+Legion injects a `MONGODB_URI` per game and channel for exactly this case;
+wiring an adapter to it is the fix, and until then the `VOLUME` in the
+Dockerfile is honest about promising nothing on Kubernetes.
+
+### Netlify (the static client alone)
+
+`netlify.toml` still builds and publishes `client/dist`, which is useful for
+previewing the client against a server running anywhere else. It does not
+deploy the Colyseus server.
