@@ -1,0 +1,58 @@
+import { ArraySchema, MapSchema, Schema, type } from '@colyseus/schema';
+import { LEADERBOARD_SIZE } from '@moonwalk/shared';
+import { PlayerState } from './PlayerState.js';
+
+/** One row of one board: who, and how much. */
+export class LeaderEntry extends Schema {
+  /** Derived from the player's id on the server. Empty means an empty row. */
+  @type('string') handle = '';
+  @type('float64') value = 0;
+}
+
+/**
+ * The three boards on the arena's back wall.
+ *
+ * FIXED-LENGTH arrays, allocated once and written in place. A board is
+ * rewritten every couple of seconds, and clearing and refilling nine entries
+ * each time would send the whole thing to every client on every rebuild
+ * whether or not a single place had actually changed.
+ *
+ * Everything in here is the server's own figure. No client is asked for its
+ * totals, and none could usefully claim any: these come from the same state
+ * the rewards are paid into.
+ */
+export class LeaderboardState extends Schema {
+  @type([LeaderEntry]) wins = rows();
+  @type([LeaderEntry]) speed = rows();
+  @type([LeaderEntry]) rebirths = rows();
+}
+
+const rows = (): ArraySchema<LeaderEntry> => {
+  const list = new ArraySchema<LeaderEntry>();
+  for (let i = 0; i < LEADERBOARD_SIZE; i += 1) list.push(new LeaderEntry());
+  return list;
+};
+
+/**
+ * Root replicated state for a single world instance.
+ *
+ * There is no guard here, and that is deliberate. Every player is chased by
+ * their OWN guard, simulated on their own machine: replicating one per player
+ * would put fifteen chasing entities on the wire at twenty hertz to draw
+ * fourteen things nobody is allowed to see.
+ */
+export class CourseState extends Schema {
+  @type({ map: PlayerState }) players = new MapSchema<PlayerState>();
+
+  /**
+   * Server uptime in seconds.
+   *
+   * Not a diagnostic: it is the CLOCK that every disco ball is a pure function
+   * of. The server evaluates them against this to decide a death, and the
+   * client evaluates the identical functions against the replicated value to
+   * draw them - so there is no hazard state on the wire at all.
+   */
+  @type('float64') elapsed = 0;
+
+  @type(LeaderboardState) leaderboard = new LeaderboardState();
+}
