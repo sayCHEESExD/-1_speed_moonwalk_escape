@@ -408,7 +408,12 @@ export class CourseRoom extends Room<CourseState> {
     if (!player) return;
     const name = sanitiseDisplayName(message?.name);
     const pfp = sanitisePfpUrl(message?.pfp);
-    if (player.displayName !== name) player.displayName = name;
+    if (player.displayName !== name) {
+      // The other end of the chain the client logs when it sends: what the
+      // room will actually show this player as. On change only.
+      logger.info(SCOPE, `${sessionId} is now "${name || '(no name - shown as a guest)'}"`);
+      player.displayName = name;
+    }
     if (player.avatarUrl !== pfp) player.avatarUrl = pfp;
     // Persist it, so the boards can still name this player after they leave.
     const playerId = this.playerIds.get(sessionId);

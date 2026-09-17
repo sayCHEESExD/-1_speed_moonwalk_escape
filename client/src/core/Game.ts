@@ -756,6 +756,25 @@ export class Game {
             avatarHeight: state.avatar?.height,
           }
         : '(no player state yet)',
+      /*
+       * PROGRESSION, because "my level is frozen" and "everyone is a guest"
+       * have the same likeliest cause and it is not in this code: Speed is
+       * granted by the SERVER from movement it observes, so a session that is
+       * not in a room cannot level up and cannot be named either. This says
+       * which of the two it is without another round of guessing.
+       */
+      progression: state
+        ? {
+            totalSpeed: Math.round(state.totalSpeed),
+            level: state.level,
+            maxLevel: state.maxLevel,
+            speedPerStep: state.speedPerStep,
+            moveMultiplier: state.moveMultiplier,
+            note: this.network.inRoom
+              ? 'the server is crediting Speed; the level follows from it'
+              : 'NOT IN A ROOM - Speed is server-granted, so nothing can level up',
+          }
+        : '(no player state yet)',
       localLook: this.bloxityAvatar?.current ?? '(avatar not built yet)',
       remotePlayers: [...this.remotePlayers.entries()].map(([id, remote]) => ({
         sessionId: id,
@@ -802,6 +821,21 @@ export class Game {
     const key = `${identity.name}\u0000${identity.pfp}`;
     if (key === this.lastIdentity) return;
     this.lastIdentity = key;
+    /*
+     * One line, on CHANGE only, naming what the portal gave and what is being
+     * sent. This is the first link of the chain that ends in a nameplate, and
+     * when it reads "no usable name" the fault is upstream of this game -
+     * which is a question that has cost several rounds to answer without it.
+     */
+    logger.info(
+      SCOPE,
+      identity.name
+        ? `identity: sending "${identity.name}" (portrait ${identity.pfp ? 'yes' : 'no'})`
+        : 'identity: the SDK gave no usable name ' +
+            `(user=${user ? 'present' : 'none'}, ` +
+            `displayName=${JSON.stringify(user?.displayName ?? null)}, ` +
+            `username=${JSON.stringify(user?.username ?? null)})`,
+    );
     this.network.sendIdentity(identity);
   }
 
