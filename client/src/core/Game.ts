@@ -10,7 +10,7 @@ import {
 import { Vector3 } from 'three';
 import { AudioManager } from '../audio/AudioManager.js';
 import { PlayerAudio } from '../audio/PlayerAudio.js';
-import { Bloxity } from '../bloxity/Bloxity.js';
+import { Bloxity, GAME_SLUG } from '../bloxity/Bloxity.js';
 import { BloxityAvatar } from '../bloxity/BloxityAvatar.js';
 import { identityFromLegion } from '../bloxity/identity.js';
 import { ThirdPersonCamera } from '../camera/ThirdPersonCamera.js';
@@ -41,6 +41,14 @@ import { logger } from '../util/logger.js';
 import { CourseWorld } from '../world/CourseWorld.js';
 
 const SCOPE = 'Game';
+
+/**
+ * How often the portal is re-asked who this player is, in seconds.
+ *
+ * Slow on purpose: this is a backstop for a missed `onUserChanged`, not a
+ * polling loop. Nothing is sent unless the answer changed.
+ */
+const IDENTITY_RECHECK_SECONDS = 5;
 
 /**
  * Milliseconds after our own join during which a remote player counts as
@@ -150,6 +158,8 @@ export class Game {
   private localPfp = '';
   /** The identity last sent, so an unchanged one is not re-sent every frame. */
   private lastIdentity = '';
+  /** Seconds since the portal identity was last re-checked. */
+  private identityTimer = 0;
   /** Remote players already announced to Bloxity, so a name is toasted once. */
   private readonly announced = new Set<string>();
   private joinedAt = 0;
@@ -466,6 +476,8 @@ export class Game {
 
   start(): void {
     this.input.attach(this.renderer.renderer.domElement);
+    // Once, after the join and any portal login have had a moment to land.
+    window.setTimeout(() => this.diagnose(), 3000);
     // The loading screen comes down and the session begins.
     this.bloxity.loadingEnd();
     this.bloxity.gameplayStart();
@@ -514,6 +526,13 @@ export class Game {
 
       this.updateGuard(delta, player);
 
+      // Slow re-check of who the portal says this is. See `syncIdentity`.
+      this.identityTimer += delta;
+      if (this.identityTimer >= IDENTITY_RECHECK_SECONDS) {
+        this.identityTimer = 0;
+        this.syncIdentity();
+      }
+
       // The death animation has run its course; place the player, preferring
       // the server's own transform when it has already arrived.
       if (player.deathComplete) this.applyPendingRespawn();
@@ -521,7 +540,11 @@ export class Game {
       // Still not placed. The prediction and the server disagreed about the
       // death, so ASK for a placement rather than sit frozen waiting for one
       // that was never coming.
-      if (player.consumeRespawnNudge()) {
+      // A DEAD player only. The nudge cannot fire for a live one - it counts
+      // from the end of the fall-over - and this says so out loud anyway,
+      // because anything that can place a living player is one flapping socket
+      // away from teleporting them to spawn twice a second.
+      if (player.isDying && player.consumeRespawnNudge()) {
         if (this.network.inRoom) {
           logger.warn(SCOPE, 'death was not acknowledged; requesting a respawn');
           this.network.requestRespawn('manual');
@@ -673,6 +696,73 @@ export class Game {
     this.guard.placeBehind(player.position, player.rotationY);
   }
 
+  /**
+   * Print what is ACTUALLY true at runtime, once, a moment after start-up.
+   *
+   * Every "the player shows as Guest" and "the avatar is wrong" report so far
+   * has come down to a question nobody could answer from the outside: which
+   * server did the browser reach, did the room accept it, was anyone signed in
+   * when the join was built, and did the name and the look survive the trip.
+   * Guessing at those cost several rounds, so the game now says.
+   *
+   * Names are printed; the TOKEN never is - only whether one exists and how
+   * long it is. This is a diagnostic, not a credential dump.
+   */
+  diagnose(): Record<string, unknown> {
+    const user = this.bloxity.getUser();
+    const token = this.bloxity.getToken();
+    const state = this.network.playerState(this.network.sessionId ?? '');
+    const report = {
+      sdk: {
+        scriptPresent: this.bloxity.available,
+        initialised: this.bloxity.initialised,
+        environment: this.bloxity.embedded ? 'embedded' : 'standalone',
+        gameSlug: GAME_SLUG,
+        isLoggedIn: this.bloxity.isLoggedIn(),
+        user: user
+          ? {
+              displayName: user.displayName ?? '',
+              username: user.username ?? '',
+              isGuest: user.isGuest === true,
+              hasPfp: Boolean(user.pfp),
+            }
+          : null,
+        tokenLength: token ? token.length : 0,
+      },
+      identitySent: this.lastIdentity.split('\u0000'),
+      connection: {
+        serverUrl: clientConfig.serverUrl || '(none configured)',
+        status: this.network.connectionStatus,
+        inRoom: this.network.inRoom,
+        roomId: this.network.roomId,
+        sessionId: this.network.sessionId ?? '',
+      },
+      replicatedForMe: state
+        ? {
+            displayName: state.displayName,
+            avatarUrl: state.avatarUrl,
+            hasAvatarField: 'avatar' in state,
+            avatarBloxity: state.avatar?.bloxity,
+            avatarSkin: state.avatar?.skin,
+            avatarHat: state.avatar?.hat,
+            avatarHeight: state.avatar?.height,
+          }
+        : '(no player state yet)',
+      localLook: this.bloxityAvatar?.current ?? '(avatar not built yet)',
+      remotePlayers: [...this.remotePlayers.entries()].map(([id, remote]) => ({
+        sessionId: id,
+        displayName: remote.displayName,
+        look: remote.look,
+      })),
+      leaderboardTop: this.network.leaderboard?.speed
+        .filter((row) => row.name)
+        .slice(0, 3)
+        .map((row) => `${row.name}: ${Math.round(row.value)}`),
+    };
+    logger.info(SCOPE, 'runtime diagnostic:', report);
+    return report;
+  }
+
   /** Arrive rather than ease whenever the player was PLACED, not moved. */
   private snapCameraIfPlaced(): void {
     const player = this.localPlayer;
@@ -687,9 +777,17 @@ export class Game {
   /**
    * Send the portal identity if it differs from what was last sent.
    *
-   * Called on every login and logout and once at start-up, never per frame.
-   * `getUser()` is asked each time rather than a cached user being kept, which
-   * is the SDK's own rule for this.
+   * Called on every login and logout, once at start-up, and from a slow
+   * re-check - never per frame. `getUser()` is asked each time rather than a
+   * cached user being kept, which is the SDK's own rule for this.
+   *
+   * The re-check exists because `onUserChanged` is a third party's promise,
+   * not a guarantee: a session that signs in while the SDK is mid-handshake,
+   * or a build that resolves the profile without re-emitting, would otherwise
+   * stay nameless for ever with a perfectly good user sitting in `getUser()`.
+   * It SENDS NOTHING unless the answer actually changed, so an idle signed-out
+   * player costs one function call every few seconds and no traffic at all.
+   * It cannot move anybody: the only thing it can do is set a name.
    */
   private syncIdentity(user = this.bloxity.getUser()): void {
     const identity = identityFromLegion(user);

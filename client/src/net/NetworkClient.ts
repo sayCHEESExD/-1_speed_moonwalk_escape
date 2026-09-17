@@ -105,10 +105,6 @@ export class NetworkClient {
   private look: AvatarLook | null = null;
   /** The local player's portal identity, re-sent on every (re)join. */
   private identityMessage: SetIdentityMessage | null = null;
-  /** True while `disconnect()` is deliberately taking the session down. */
-  private leaving = false;
-  /** True while a rejoin is already in flight, so a flapping socket queues one. */
-  private rejoining = false;
   /** So the "older server" complaint is made once per session, not per join. */
   private checkedFields = false;
   private status: ConnectionStatus = 'idle';
@@ -170,6 +166,11 @@ export class NetworkClient {
    * never arrive is a frozen player, and this game deliberately keeps running
    * with no server.
    */
+  /** One player's replicated state, for diagnostics. */
+  playerState(sessionId: string): NetPlayerState | undefined {
+    return this.room?.state?.players?.get(sessionId);
+  }
+
   get inRoom(): boolean {
     return this.room !== null;
   }
@@ -200,10 +201,6 @@ export class NetworkClient {
   }
 
   async connect(): Promise<void> {
-    // Connecting cancels a deliberate departure: a session that is asking for
-    // a room again is not leaving, and leaving it latched would mean the NEXT
-    // dropped socket never tried to come back.
-    this.leaving = false;
     // No endpoint is a CONFIGURATION fault, not a network one, and it is
     // reported as one before a socket is ever attempted. On a static host this
     // is far and away the likeliest thing to be wrong.
@@ -335,32 +332,7 @@ export class NetworkClient {
     this.room?.send(MessageType.RequestRespawn, message);
   }
 
-  /**
-   * Get back into a room after losing one.
-   *
-   * The same backoff the first join uses, and the same join options - so the
-   * player comes back as themselves, wearing what they were wearing, with
-   * their progression restored from the id the browser has always had. A
-   * session that cannot get back stays playable and says so; it does not sit
-   * in a retry loop for ever.
-   */
-  private async rejoin(): Promise<void> {
-    if (this.rejoining || this.leaving) return;
-    this.rejoining = true;
-    try {
-      this.setStatus('reconnecting');
-      await this.connect();
-      logger.info(SCOPE, 'reconnected');
-    } catch {
-      // `connect` has already exhausted its own backoff and reported the
-      // failure; the game keeps running offline.
-    } finally {
-      this.rejoining = false;
-    }
-  }
-
   async disconnect(): Promise<void> {
-    this.leaving = true;
     await this.room?.leave(true);
     this.room = null;
     this.setStatus('disconnected');
@@ -408,13 +380,20 @@ export class NetworkClient {
 
     room.onLeave((code) => {
       logger.warn(SCOPE, `left room (code ${code})`);
-      this.room = null;
+      // Only if THIS room is still the current one. A late close from a
+      // superseded socket must not null out a live room.
+      if (this.room === room) this.room = null;
       this.setStatus('disconnected', `code ${code}`);
-      // A server that went away may come back - a restart, a redeploy, a
-      // dropped connection. Everything the room needs to know about this
-      // player travels with the join (the stored id, the portal identity and
-      // the look), so a rejoin restores the session rather than half of it.
-      if (!this.leaving) void this.rejoin();
+      /*
+       * NO AUTOMATIC REJOIN, and that is a rule rather than an omission.
+       *
+       * A rejoin looks harmless and is not: every join PLACES the player at
+       * the arena, so a socket that flaps - or a late `onLeave` from a
+       * superseded room - turns into a player who is teleported to spawn over
+       * and over while perfectly alive. That shipped once and made the game
+       * unplayable. Reconnecting is the player's call, by reloading, and the
+       * offline notice tells them so.
+       */
     });
   }
 

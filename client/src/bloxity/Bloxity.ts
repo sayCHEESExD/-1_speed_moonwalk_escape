@@ -111,9 +111,15 @@ export class Bloxity {
   private readonly unsubscribes: (() => void)[] = [];
   private readonly userListeners = new Set<(user: LegionUser | null) => void>();
   private started = false;
+  private didInit = false;
 
   constructor(host: BloxityHost) {
     this.host = host;
+  }
+
+  /** Whether `init` actually ran - not merely whether the script is present. */
+  get initialised(): boolean {
+    return this.didInit;
   }
 
   get available(): boolean {
@@ -140,6 +146,7 @@ export class Bloxity {
     }
 
     guard('init', () => api.init({ gameSlug: GAME_SLUG }));
+    this.didInit = true;
     logger.info(SCOPE, `SDK initialised as "${GAME_SLUG}" (${this.embedded ? 'embedded' : 'standalone'})`);
 
     this.watchUser();

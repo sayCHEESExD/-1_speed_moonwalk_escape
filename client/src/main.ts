@@ -48,6 +48,17 @@ const main = async (): Promise<void> => {
   const loop = new GameLoop((delta, now) => game.update(delta, now));
   loop.start();
 
+  /*
+   * One hook that exists in EVERY build, debug or not.
+   *
+   * The game prints a runtime diagnostic once at start-up; this is how anyone
+   * asks for a fresh one after signing in, joining, or watching something go
+   * wrong on a deployed build - where the dev handle below does not exist.
+   * It reads state and prints it. It never touches the session.
+   */
+  (window as Window & { moonwalkDiagnose?: () => unknown }).moonwalkDiagnose = () =>
+    game.diagnose();
+
   if (clientConfig.debug) {
     // Dev-only handle: lets the game be stepped by hand from the console or by
     // an automated browser check, where requestAnimationFrame is throttled.

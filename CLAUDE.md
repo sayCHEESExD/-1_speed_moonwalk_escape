@@ -320,11 +320,16 @@ This is the whole game, so it gets its own section.
   a crashed server, a dead deployment, another game holding this one's port -
   and it is exactly what it looked like. Nothing is granted offline, so there
   is nothing there to cheat.
-- **A dropped room is rejoined** (`NetworkClient.rejoin`), with the same
-  backoff and the same join options the first join used - the stored player id,
-  the portal identity and the look all travel with it, so a restarted server
-  restores the whole session rather than half of it. A deliberate
-  `disconnect()` does not come back.
+- **A dropped room is NEVER rejoined automatically.** This was tried and had
+  to be reverted: every join PLACES the player at the arena, so a flapping
+  socket - or a late `onLeave` from a room object that had already been
+  superseded - became a live player teleported to spawn over and over, about
+  once a second. Reconnecting is the player's call, by reloading, and the
+  offline notice tells them the session is not connected. `onLeave` also
+  ignores a leave from a room that is no longer the current one.
+- **Nothing may place a LIVING player.** A placement follows a death, a join or
+  a server respawn, and nothing else. Anything that can move a player who did
+  not ask to be moved is one flapping socket away from being unplayable.
 
 ## Progression
 

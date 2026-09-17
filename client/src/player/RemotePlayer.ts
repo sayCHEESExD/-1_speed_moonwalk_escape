@@ -1,4 +1,4 @@
-import { MOVEMENT } from '@moonwalk/shared';
+import { MOVEMENT, type AvatarLook } from '@moonwalk/shared';
 import { DEATH } from '../config/animationConfig.js';
 import { createAnimationInput, type AnimationInput } from '../animation/AnimationInput.js';
 import { BloxityAvatar } from '../bloxity/BloxityAvatar.js';
@@ -55,6 +55,10 @@ export class RemotePlayer {
    */
   displayName = '';
   pfp = '';
+  /** The look last applied, for diagnostics. */
+  get look(): AvatarLook {
+    return this.avatar.current;
+  }
 
   /** Latest authoritative transform, eased toward every frame. */
   private targetX = 0;
