@@ -188,6 +188,51 @@ jobs:
             *)  echo "::error::Server deploy failed with HTTP $HTTP."; exit 1 ;;
           esac
 
+      # ------------------------------------------------------------------
+      # Did the container ACTUALLY change?
+      #
+      # The call above only proves Legion accepted the request. It accepted six
+      # of them while the same container kept running, and nothing anywhere
+      # said so: the client deployed fine each time, so the two halves drifted
+      # apart until the running server was old enough to hang up on a message
+      # the new client sends - which players experienced as "everyone is called
+      # Guest and nobody levels up".
+      #
+      # /health reports the commit it was built from, so the rollout can be
+      # waited on and FAILED rather than assumed.
+      - name: Wait for the server to actually be running this commit
+        env:
+          CHANNEL: ${{ needs.channel.outputs.name }}
+        run: |
+          set -euo pipefail
+          if [ "$CHANNEL" = "prod" ]; then
+            HOST="https://${BLOXITY_GAME_ID}.host.bloxity.io"
+          else
+            HOST="https://${BLOXITY_GAME_ID}.dev.host.bloxity.io"
+          fi
+          echo "Polling $HOST/health for version ${GITHUB_SHA}"
+
+          # Ten minutes: a cold image pull on a managed host is slow, and a
+          # deploy that takes longer than that has gone wrong anyway.
+          for attempt in $(seq 1 60); do
+            BODY=$(curl -fsS --max-time 10 "$HOST/health" || echo '{}')
+            VERSION=$(printf '%s' "$BODY" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')
+            if [ "$VERSION" = "$GITHUB_SHA" ]; then
+              echo "Server is running ${GITHUB_SHA}."
+              exit 0
+            fi
+            echo "  attempt ${attempt}/60: running '${VERSION:-unknown}'"
+            sleep 10
+          done
+
+          echo "::error::Legion accepted the deploy but the server is still NOT running ${GITHUB_SHA}."
+          echo "::error::The container is serving '${VERSION:-unknown}'. The usual cause is that Legion"
+          echo "::error::cannot PULL ${IMAGE_NAME}: make that GHCR package public (Packages ->"
+          echo "::error::speed-moonwalk-escape-server -> Package settings -> Change visibility), or give"
+          echo "::error::Legion registry credentials. A client deployed against an older server loses"
+          echo "::error::player names and, if the gap is wide enough, the connection itself."
+          exit 1
+
           if [ "$CHANNEL" = "dev" ]; then
             echo "Backend: https://${BLOXITY_GAME_ID}.dev.host.bloxity.io"
           else
