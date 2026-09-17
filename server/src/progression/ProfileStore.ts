@@ -1,4 +1,4 @@
-import { INITIAL_OWNED_TIERS } from '@moonwalk/shared';
+import { INITIAL_OWNED_TIERS, avatarLookFrom, portraitUrlFor } from '@moonwalk/shared';
 import { createPersistence, type PersistenceAdapter, type StoredProfile } from '../persistence/index.js';
 import type { PlayerState } from '../rooms/state/PlayerState.js';
 
@@ -85,7 +85,14 @@ class ProfileStore {
       // Bloxity profile. A player who signs out keeps the last name the boards
       // knew rather than becoming a Guest row with somebody's totals on it.
       displayName: player.displayName || this.profiles.get(playerId)?.displayName || '',
-      avatarUrl: player.avatarUrl || this.profiles.get(playerId)?.avatarUrl || '',
+      // The portrait a board shows when this player is offline: their account
+      // picture if they have one, otherwise Bloxity's render of the look they
+      // were last seen in.
+      avatarUrl:
+        player.avatarUrl ||
+        portraitUrlFor(avatarLookFrom(player.avatar)) ||
+        this.profiles.get(playerId)?.avatarUrl ||
+        '',
       updatedAt: Date.now(),
     });
     this.adapter.save(this.profiles);

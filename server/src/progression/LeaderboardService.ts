@@ -1,4 +1,4 @@
-import { GUEST_NAME, LEADERBOARD_SIZE } from '@moonwalk/shared';
+import { GUEST_NAME, LEADERBOARD_SIZE, avatarLookFrom, portraitUrlFor } from '@moonwalk/shared';
 import type { LeaderEntry, LeaderboardState } from '../rooms/state/CourseState.js';
 import type { PlayerState } from '../rooms/state/PlayerState.js';
 import { profileStore } from './ProfileStore.js';
@@ -86,7 +86,13 @@ export class LeaderboardService {
         // A live player who has just signed in is named before their profile
         // has been written back, so the live record wins here too.
         name: player.displayName || profileStore.nameOf(id) || GUEST_NAME,
-        avatar: player.avatarUrl || profileStore.avatarOf(id),
+        // Their account picture, the one last saved, or Bloxity's render of
+        // the look they are wearing right now - in that order, so a row
+        // without an account still shows the player it belongs to.
+        avatar:
+          player.avatarUrl ||
+          profileStore.avatarOf(id) ||
+          portraitUrlFor(avatarLookFrom(player.avatar)),
         wins: player.wins,
         speed: player.totalSpeed,
         rebirths: player.rebirths,

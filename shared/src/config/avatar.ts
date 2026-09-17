@@ -214,6 +214,90 @@ export const temperProportion = (
   return Math.min(max, Math.max(min, 1 + (raw - 1) * influence));
 };
 
+/**
+ * The flat shape a look takes on the wire.
+ *
+ * A Colyseus schema has no nested objects to speak of, so a look travels as
+ * seventeen fields. This is the one place that knows that, and both halves
+ * read it back through `avatarLookFrom`.
+ */
+export type FlatAvatarLook = Partial<Record<AvatarSlot, string>> &
+  Partial<Record<keyof AvatarProportions, number>> & { bloxity?: boolean };
+
+/** Fold a flat, replicated look back into an `AvatarLook`, sanitised. */
+export const avatarLookFrom = (flat: FlatAvatarLook | undefined): AvatarLook => {
+  if (!flat) return BUNDLED_LOOK;
+  const items: Record<string, unknown> = {};
+  for (const slot of AVATAR_SLOTS) items[slot] = flat[slot];
+  const proportions: Record<string, unknown> = {};
+  for (const key of Object.keys(DEFAULT_PROPORTIONS) as (keyof AvatarProportions)[]) {
+    proportions[key] = flat[key];
+  }
+  return sanitiseAvatarLook({ bloxity: flat.bloxity === true, items, proportions });
+};
+
+/**
+ * Bloxity's OWN portrait for a look.
+ *
+ * Their service renders a headshot for any avatar and serves it from a URL
+ * built out of that avatar - and this is their scheme, lifted from the SDK
+ * bundle rather than guessed: a skin, then the hat and back item if worn, then
+ * the body parts and the seven proportions when any of them differs from the
+ * default. Each proportion is printed with `f` where the decimal point goes.
+ *
+ * Why derive it at all, when a signed-in account usually HAS a `pfp`: because
+ * the look is replicated and the portrait is not, so every player in the room
+ * can be given their own correct portrait from what is already on the wire -
+ * no second identity field, no 3D render to make a thumbnail, and no chance of
+ * one player's icon landing on another, because the URL is a pure function of
+ * that player's own look. An account's real `pfp` still wins when there is one.
+ */
+export const portraitUrlFor = (look: AvatarLook): string => {
+  const id = (value: string): string => (isEquippedId(value) ? value : '0');
+  const items = look.items;
+
+  let key = `s${id(items.skin)}`;
+  if (isEquippedId(items.hat)) key += `_h${items.hat}`;
+  if (isEquippedId(items.back)) key += `_b${items.back}`;
+
+  const head = id(items.head);
+  const armL = id(items.armL);
+  const armR = id(items.armR);
+  const legL = id(items.legL);
+  const legR = id(items.legR);
+  const torso = id(items.torso);
+  const wearsParts = [head, armL, armR, legL, legR, torso].some((value) => value !== '0');
+
+  const ordered = PORTRAIT_PROPORTION_ORDER.map((name) => look.proportions[name]);
+  const reshaped = ordered.some((value) => Math.abs(value - 1) > 1e-4);
+
+  if (wearsParts || reshaped) {
+    key += `_hd${head}_aL${armL}_aR${armR}_lL${legL}_lR${legR}_to${torso}`;
+    key += `_p${ordered.map(portraitNumber).join('-')}`;
+  }
+  return `${PORTRAIT_BASE}/${key}.png?width=128&quality=85&v=2`;
+};
+
+/** Where Bloxity renders portraits. */
+const PORTRAIT_BASE = 'https://static.bloxity.io/img/pfps';
+
+/** The order the portrait key prints proportions in. Theirs, not ours. */
+const PORTRAIT_PROPORTION_ORDER: readonly (keyof AvatarProportions)[] = [
+  'height',
+  'shoulderWidth',
+  'armLength',
+  'legOffsetX',
+  'torsoScaleX',
+  'neckHeight',
+  'headScale',
+];
+
+/** `1` becomes `1f0` and `1.25` becomes `1f25` - a decimal point is not URL-safe. */
+const portraitNumber = (value: number): string => {
+  const text = Number.parseFloat(value.toFixed(4)).toString();
+  return text.includes('.') ? text.replace('.', 'f') : `${text}f0`;
+};
+
 /** Whether two looks would draw the same character. */
 export const looksMatch = (a: AvatarLook, b: AvatarLook): boolean => {
   if (a.bloxity !== b.bloxity) return false;

@@ -1,5 +1,7 @@
 import {
+  BUNDLED_LOOK,
   GUEST_NAME,
+  portraitUrlFor,
   SPAWN_POSITION,
   SPAWN_ROTATION_Y,
   stageAt,
@@ -325,6 +327,10 @@ export class Game {
         else this.pendingLook = look;
         this.network.sendAvatarLook(look);
         this.bloxityPanel.refreshAvatar();
+        // A portrait is a RENDER of the avatar, so a new look is a new
+        // portrait - and for a player with no account picture it is the only
+        // portrait they have.
+        this.syncIdentity();
       },
       /*
        * A login or logout after joining.
@@ -341,6 +347,8 @@ export class Game {
       },
     });
     this.network.setIdentityProvider(() => this.bloxity.getToken());
+    // Read at JOIN time, not from a cached message. See `setProfileProvider`.
+    this.network.setProfileProvider(() => identityFromLegion(this.bloxity.getUser()));
     this.bloxityPanel = new BloxityPanel(container, this.bloxity);
 
     this.run = new RunController(this.world.collision, {
@@ -810,10 +818,23 @@ export class Game {
     plates.begin(this.camera.camera);
     const player = this.localPlayer;
     if (player) {
-      plates.put('local', player.character, this.localName || GUEST_NAME, this.localPfp);
+      plates.put(
+        'local',
+        player.character,
+        this.localName || GUEST_NAME,
+        this.localPfp || portraitUrlFor(this.bloxityAvatar?.current ?? BUNDLED_LOOK),
+      );
     }
     for (const [sessionId, remote] of this.remotePlayers.entries()) {
-      plates.put(sessionId, remote.character, remote.displayName || GUEST_NAME, remote.pfp);
+      // Their account picture when they have one, otherwise Bloxity's render
+      // of the look they are actually wearing - which is on the wire, so it is
+      // theirs and cannot be anybody else's.
+      plates.put(
+        sessionId,
+        remote.character,
+        remote.displayName || GUEST_NAME,
+        remote.pfp || portraitUrlFor(remote.look),
+      );
     }
     plates.end();
   }

@@ -105,6 +105,8 @@ export class NetworkClient {
   private look: AvatarLook | null = null;
   /** The local player's portal identity, re-sent on every (re)join. */
   private identityMessage: SetIdentityMessage | null = null;
+  /** Where the join reads the portal identity from, live. */
+  private profile: (() => SetIdentityMessage | null) | null = null;
   /** So the "older server" complaint is made once per session, not per join. */
   private checkedFields = false;
   private status: ConnectionStatus = 'idle';
@@ -116,6 +118,20 @@ export class NetworkClient {
   /** Where to read the Bloxity token at join time. */
   setIdentityProvider(provider: () => string | null): void {
     this.identity = provider;
+  }
+
+  /**
+   * Where to read the portal identity at JOIN time.
+   *
+   * A provider rather than the last message sent, because the two are not the
+   * same thing: the SDK resolves a signed-in user with a round trip of its own
+   * (`init` fetches the profile, then notifies), so a join that happens in that
+   * window would otherwise carry nothing and the player would sit as a guest
+   * until their next portal event. Asking at the moment of joining closes that
+   * window - the proven arrangement from the previous game in this series.
+   */
+  setProfileProvider(provider: () => SetIdentityMessage | null): void {
+    this.profile = provider;
   }
 
   /**
@@ -225,9 +241,10 @@ export class NetworkClient {
           playerId,
           // Optional. Verified by the server with Bloxity, never trusted as-is.
           bloxityToken: this.identity?.() ?? undefined,
-          // Who the portal says this is, so a player has their name from the
-          // first patch rather than from their next portal event.
-          identity: this.identityMessage ?? undefined,
+          // Who the portal says this is, ASKED FOR NOW rather than taken from
+          // whatever was last sent, so a login that landed mid-connect still
+          // travels with the join.
+          identity: this.profile?.() ?? this.identityMessage ?? undefined,
         });
         // Whatever this player looks like, said again on the new socket.
         if (this.look) this.room.send(MessageType.AvatarLook, this.look satisfies AvatarLookMessage);

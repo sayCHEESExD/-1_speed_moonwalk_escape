@@ -60,7 +60,8 @@ export const sanitiseDisplayName = (raw: unknown): string => {
  * not a Bloxity portrait. The trailing slash is load-bearing: without it
  * `https://static.bloxity.io.example.com` would pass the prefix test.
  */
-const PFP_ORIGIN = 'https://static.bloxity.io/';
+const PFP_HOST = 'https://static.bloxity.io';
+const PFP_ORIGIN = `${PFP_HOST}/`;
 
 /** Longest portrait URL accepted. The SDK's signed avatar paths run long. */
 const PFP_MAX_LENGTH = 512;
@@ -76,8 +77,18 @@ const PFP_MAX_LENGTH = 512;
  */
 export const sanitisePfpUrl = (raw: unknown): string => {
   if (typeof raw !== 'string') return '';
-  const url = raw.trim();
-  if (url.length === 0 || url.length > PFP_MAX_LENGTH) return '';
+  const given = raw.trim();
+  if (given.length === 0 || given.length > PFP_MAX_LENGTH) return '';
+  /*
+   * A ROOT-RELATIVE path is resolved onto Bloxity's asset host rather than
+   * refused. The SDK hands out absolute portraits today, but the API it reads
+   * them from stores them as paths (`/img/pfps/....png`) - and a portrait
+   * dropped for that reason is a player with no icon beside their name for no
+   * reason the player could ever discover. `//host/…` is NOT a path: it is an
+   * origin in disguise, so it is refused with everything else.
+   */
+  const url = given.startsWith('/') && !given.startsWith('//') ? `${PFP_HOST}${given}` : given;
+  if (url.length > PFP_MAX_LENGTH) return '';
   if (!url.startsWith(PFP_ORIGIN)) return '';
   return /^[A-Za-z0-9._~:/?#@!$&*+,;=%-]+$/.test(url) ? url : '';
 };

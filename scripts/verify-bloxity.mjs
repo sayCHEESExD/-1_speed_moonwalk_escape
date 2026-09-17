@@ -23,6 +23,8 @@ import {
   sanitiseAvatarLook,
   sanitiseDisplayName,
   sanitisePfpUrl,
+  portraitUrlFor,
+  avatarLookFrom,
   temperProportion,
   PROPORTION_RANGES,
   PROPORTION_TEMPER,
@@ -169,7 +171,17 @@ console.log('\nwho a board names\n');
   check('with no @, no tag and no generated word pair', !/[@_]/.test(board.wins[0].name));
   check('their Bloxity picture rides along with it', board.wins[0].avatar === 'https://static.bloxity.io/img/pfps/3.png');
   check(`a player with no Bloxity identity is "${GUEST_NAME}"`, board.wins[1].name === GUEST_NAME);
-  check('a guest row carries no picture', board.wins[1].avatar === '');
+  // A row without an account is still a row about a PLAYER, so it carries
+  // Bloxity's render of the look that player is wearing. Only their own
+  // account picture outranks it.
+  check(
+    'a row without an account still carries that player’s own portrait',
+    board.wins[1].avatar === portraitUrlFor(avatarLookFrom(live[1][1].avatar)),
+  );
+  check(
+    'and a signed-in account’s own picture outranks the derived one',
+    board.wins[0].avatar === 'https://static.bloxity.io/img/pfps/3.png',
+  );
   check('an empty place is blank, not a name', board.wins[2].name === '');
   check(
     'no row anywhere is an internal id',
@@ -269,6 +281,59 @@ console.log('\nwho the portal says a player is\n');
   check('a lookalike host is refused', sanitisePfpUrl('https://static.bloxity.io.example.com/x.png') === '');
   check('a javascript: portrait is refused', sanitisePfpUrl('javascript:alert(1)') === '');
   check('a portrait carrying quotes or spaces is refused', sanitisePfpUrl('https://static.bloxity.io/a b".png') === '');
+}
+
+
+console.log('\nportraits\n');
+{
+  // Bloxity renders a headshot for any avatar and serves it from a URL built
+  // out of that avatar. The scheme is THEIRS - taken from the SDK bundle - so
+  // these assertions are what stop it drifting into something of ours that
+  // happens to look similar and 404s for every player.
+  const look = (items = {}, proportions = {}) =>
+    avatarLookFrom({ bloxity: true, ...items, ...proportions });
+  const base = 'https://static.bloxity.io/img/pfps';
+  const tail = '?width=128&quality=85&v=2';
+
+  check('a default avatar is s0', portraitUrlFor(look()) === `${base}/s0.png${tail}`);
+  check(
+    'a skin is the key',
+    portraitUrlFor(look({ skin: '69cb00f6c3c4aac219abd8c3' })) ===
+      `${base}/s69cb00f6c3c4aac219abd8c3.png${tail}`,
+  );
+  check(
+    'a hat and a back item are appended in that order',
+    portraitUrlFor(look({ skin: '69cb00f6c3c4aac219abd8c3', hat: 'AAA', back: 'BBB' })) ===
+      `${base}/s69cb00f6c3c4aac219abd8c3_hAAA_bBBB.png${tail}`,
+  );
+  check(
+    'body parts pull in the parts-and-proportions half',
+    portraitUrlFor(look({ head: 'HHH' })) ===
+      `${base}/s0_hdHHH_aL0_aR0_lL0_lR0_to0_p1f0-1f0-1f0-1f0-1f0-1f0-1f0.png${tail}`,
+  );
+  check(
+    'so does a changed proportion, printed their way',
+    portraitUrlFor(look({}, { height: 1.25 })).includes('_p1f25-1f0-1f0-1f0-1f0-1f0-1f0.png'),
+  );
+  check(
+    'an unequipped slot is 0, never an empty string',
+    !portraitUrlFor(look({ head: 'HHH', armL: '', legR: '-1' })).includes('_aL_'),
+  );
+  check(
+    'two different looks never share a portrait',
+    portraitUrlFor(look({ skin: 'A' })) !== portraitUrlFor(look({ skin: 'B' })),
+  );
+  check(
+    'the proportions are printed in Bloxity\u2019s order, height first',
+    portraitUrlFor(look({}, { headScale: 1.5 })).includes('-1f5.png'),
+  );
+
+  check(
+    'a portrait given as a PATH resolves onto the asset host',
+    sanitisePfpUrl('/img/pfps/s0.png') === 'https://static.bloxity.io/img/pfps/s0.png',
+  );
+  check('a protocol-relative host is still refused', sanitisePfpUrl('//evil.example/x.png') === '');
+  check('a derived portrait survives its own sanitiser', sanitisePfpUrl(portraitUrlFor(look())) === portraitUrlFor(look()));
 }
 
 console.log(`\n${failures === 0 ? 'bloxity verified' : `${failures} FAILURE(S)`}\n`);
