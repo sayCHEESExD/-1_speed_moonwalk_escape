@@ -6,6 +6,14 @@ export interface ClientConfig {
   readonly serverUrl: string;
   /** Verbose console diagnostics. */
   readonly debug: boolean;
+  /**
+   * The commit this bundle was built from, or 'dev'.
+   *
+   * Baked in by the deploy workflow. It is the only way to tell a stale hosted
+   * bundle from a fresh one without reading the JavaScript by hand, which is
+   * what had to be done the first time a deployment went out of step.
+   */
+  readonly buildVersion: string;
   /** Cap on devicePixelRatio, to protect mobile GPUs. */
   readonly maxPixelRatio: number;
 }
@@ -61,5 +69,6 @@ const resolveServerUrl = (): string => {
 export const clientConfig: ClientConfig = {
   serverUrl: resolveServerUrl(),
   debug: import.meta.env.DEV || import.meta.env['VITE_DEBUG'] === '1',
+  buildVersion: ((import.meta.env['VITE_BUILD_VERSION'] as string | undefined) || 'dev').slice(0, 40),
   maxPixelRatio: 2,
 };

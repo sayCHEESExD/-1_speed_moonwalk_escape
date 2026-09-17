@@ -3,6 +3,8 @@ import {
   ROOM_NAME,
   type AvatarLook,
   type AvatarLookMessage,
+  PROTOCOL_SET_IDENTITY,
+  PROTOCOL_VERSION,
   type BloxityIdentityMessage,
   type SetIdentityMessage,
   type BuyUpgradeMessage,
@@ -107,6 +109,8 @@ export class NetworkClient {
   private identityMessage: SetIdentityMessage | null = null;
   /** Where the join reads the portal identity from, live. */
   private profile: (() => SetIdentityMessage | null) | null = null;
+  /** The protocol the joined room declares. 0 until its first patch says. */
+  private serverProtocol = 0;
   /** So the "older server" complaint is made once per session, not per join. */
   private checkedFields = false;
   private status: ConnectionStatus = 'idle';
@@ -155,6 +159,12 @@ export class NetworkClient {
    */
   sendIdentity(identity: SetIdentityMessage): void {
     this.identityMessage = identity;
+    // Never to a server that does not know the message: it would answer by
+    // closing the connection. The join options carry the same identity, and an
+    // older server ignores an option it does not read.
+    // Held back until the room has declared a protocol that can hear it. The
+    // moment it does, `watchProtocol` sends what was stored here.
+    if (this.serverProtocol < PROTOCOL_SET_IDENTITY) return;
     this.room?.send(MessageType.SetIdentity, identity);
   }
 
@@ -182,6 +192,63 @@ export class NetworkClient {
    * never arrive is a frozen player, and this game deliberately keeps running
    * with no server.
    */
+  /**
+   * Watch the protocol the joined room declares, and say so when it is old.
+   *
+   * This exists because of an outage that cost days to find: Colyseus answers
+   * a message with NO REGISTERED HANDLER by closing the connection (4002). A
+   * client one deploy ahead of its server therefore joins, says hello, and is
+   * thrown straight back out - and because every reward is server-granted, the
+   * symptom is not "a network error" but "everyone is called Guest and nobody
+   * can level up".
+   *
+   * Read off the STATE rather than from `/health`: the two halves are served
+   * from different hosts, so a browser blocks that request before the server
+   * ever sees it. A room with no `protocol` field is an older server, which is
+   * the whole point.
+   */
+  private watchProtocol(room: Room<NetCourseState>, $: ReturnType<typeof getStateCallbacks>): void {
+    this.serverProtocol = 0;
+    /*
+     * WATCHED, not sampled. The room is bound the instant the join resolves,
+     * and the first state patch has not arrived yet - reading the field there
+     * finds nothing and would condemn a perfectly current server to the old
+     * path for the whole session.
+     *
+     * A server too old to have the field never fires this, which is exactly
+     * how it is recognised.
+     */
+    $(room.state).listen('protocol', (value?: number) => {
+      const declared = typeof value === 'number' && value > 0 ? value : 0;
+      if (declared <= this.serverProtocol) return;
+      this.serverProtocol = declared;
+      // Anything held back until the contract was known can go now.
+      if (declared >= PROTOCOL_SET_IDENTITY && this.identityMessage && this.room) {
+        this.room.send(MessageType.SetIdentity, this.identityMessage);
+      }
+    });
+
+    // Long enough for the first patch; short enough to be in the log beside
+    // the join it belongs to.
+    window.setTimeout(() => {
+      if (this.room !== room || this.serverProtocol >= PROTOCOL_SET_IDENTITY) return;
+      logger.error(
+        SCOPE,
+        `this client speaks protocol ${PROTOCOL_VERSION} and the game server ` +
+          'declares none, so it is an OLDER BUILD than the client. Player names ' +
+          'will show as guests until the SERVER is redeployed. Everything else ' +
+          'still works - the identity message is held back rather than sent, ' +
+          'because sending it makes that server close the connection, and a ' +
+          'player who is not in a room can never earn anything at all.',
+      );
+    }, 4000);
+  }
+
+  /** What the joined room said it was, for diagnostics. */
+  get build(): { protocol: number } {
+    return { protocol: this.serverProtocol };
+  }
+
   /** One player's replicated state, for diagnostics. */
   playerState(sessionId: string): NetPlayerState | undefined {
     return this.room?.state?.players?.get(sessionId);
@@ -248,7 +315,9 @@ export class NetworkClient {
         });
         // Whatever this player looks like, said again on the new socket.
         if (this.look) this.room.send(MessageType.AvatarLook, this.look satisfies AvatarLookMessage);
-        if (this.identityMessage) this.room.send(MessageType.SetIdentity, this.identityMessage);
+        if (this.identityMessage && this.serverProtocol >= PROTOCOL_SET_IDENTITY) {
+          this.room.send(MessageType.SetIdentity, this.identityMessage);
+        }
         break;
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
@@ -357,6 +426,7 @@ export class NetworkClient {
 
   private bindRoom(room: Room<NetCourseState>): void {
     const $ = getStateCallbacks(room);
+    this.watchProtocol(room, $);
 
     $(room.state).players.onAdd((player, sessionId) => {
       if (sessionId === room.sessionId) this.checkServerFields(player);

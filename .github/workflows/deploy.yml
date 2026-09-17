@@ -128,6 +128,11 @@ jobs:
           tags: |
             ${{ env.IMAGE_NAME }}:${{ needs.channel.outputs.name }}-${{ github.sha }}
             ${{ env.IMAGE_NAME }}:${{ needs.channel.outputs.name }}
+          # Stamped into the image so /health can name the commit it is running.
+          # The client reports its own, and the two being different is the
+          # fault that took a day to find the first time it happened.
+          build-args: |
+            BUILD_VERSION=${{ github.sha }}
           # A layer cache in the registry, so an unchanged lockfile does not
           # re-run "npm ci" on every push.
           cache-from: type=gha
@@ -218,6 +223,9 @@ jobs:
           # The Bloxity slug the SDK initialises with - the same app id this
           # workflow deploys to, so the two can never name different games.
           VITE_BLOXITY_GAME_ID: ${{ env.BLOXITY_GAME_ID }}
+          # The same commit the server image is stamped with, so a hosted
+          # bundle can be identified without reading its JavaScript.
+          VITE_BUILD_VERSION: ${{ github.sha }}
           # Baked in at build time - Vite has no later step in which to inject
           # them, so a change here means a rebuild.
           #
@@ -288,7 +296,9 @@ jobs:
           echo
 
           case "$HTTP" in
-            2*) echo "Client published to the '$CHANNEL' channel." ;;
+            2*)
+              echo "Client published to the '$CHANNEL' channel."
+              echo "::notice::Client ${GITHUB_SHA} published to '$CHANNEL'. Verify the SERVER is on the same commit: curl https://speed-moonwalk-escape${CHANNEL:+$([ "$CHANNEL" = dev ] && echo .dev)}.host.bloxity.io/health" ;;
             401|403)
               echo "::error::Bloxity rejected the token. Re-copy LEGION_DEPLOY_TOKEN from My Games on hosting.bloxity.io (the eye icon)."
               exit 1 ;;

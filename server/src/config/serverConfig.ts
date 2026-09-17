@@ -10,6 +10,8 @@ export interface ServerConfig {
   readonly patchRateMs: number;
   /** Directory holding persisted player profiles. */
   readonly dataDir: string;
+  /** The commit this server was built from, or 'unknown'. Reported by /health. */
+  readonly buildVersion: string;
   /**
    * Shared secret Bloxity sends as `x-legion-webhook-secret`. Without one the
    * Bux webhook REFUSES every delivery (so Bloxity refunds), because an
@@ -50,6 +52,10 @@ export const serverConfig: ServerConfig = {
   // Relative to the server package, which is the working directory for both
   // `npm run dev` and `npm start`, so a restart finds the same file either way.
   dataDir: resolve(process.env['MOONWALK_DATA_DIR'] ?? 'data'),
+  // Baked into the image by the deploy workflow. Without it there is no way to
+  // tell which commit a running container is, which is exactly how a server
+  // sat six deploys behind its client without anybody being able to see it.
+  buildVersion: (process.env['MOONWALK_BUILD'] ?? 'unknown').slice(0, 40),
   buxWebhookSecret: process.env['BLOXITY_WEBHOOK_SECRET'] ?? '',
   buxAllowUnsigned: process.env['BLOXITY_WEBHOOK_ALLOW_UNSIGNED'] === '1',
   bloxityApiBase: (process.env['BLOXITY_API_BASE'] ?? 'https://api.bloxity.io').replace(/\/+$/, ''),

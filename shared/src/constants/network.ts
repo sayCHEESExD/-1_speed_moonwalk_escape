@@ -27,6 +27,28 @@ export const DEFAULT_SERVER_PORT = 2569;
  */
 export const MAX_PLAYERS_PER_ROOM = 15;
 
+/**
+ * What this build of the protocol can do, as ONE integer.
+ *
+ * Bumped whenever the client gains a message an older server would not
+ * recognise. It exists because of a real outage: Colyseus answers a message
+ * with no registered handler by CLOSING the connection (code 4002), so a
+ * client one commit ahead of its server does not degrade - it is thrown out of
+ * the room the instant it says hello, which looks exactly like "everyone is a
+ * guest and nobody can level up", because a player who is not in a room earns
+ * nothing.
+ *
+ * The client reads the server's number from `/health` BEFORE it joins and
+ * simply does not send what that server cannot hear.
+ *
+ *   1 - the original protocol.
+ *   2 - adds `SetIdentity` (the portal display name and portrait).
+ */
+export const PROTOCOL_VERSION = 2;
+
+/** The protocol a server must speak before `SetIdentity` may be sent to it. */
+export const PROTOCOL_SET_IDENTITY = 2;
+
 /** Server simulation / state broadcast rate, in Hz. */
 export const SERVER_TICK_RATE = 20;
 

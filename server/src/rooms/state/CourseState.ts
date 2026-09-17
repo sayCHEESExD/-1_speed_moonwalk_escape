@@ -1,5 +1,5 @@
 import { ArraySchema, MapSchema, Schema, type } from '@colyseus/schema';
-import { LEADERBOARD_SIZE } from '@moonwalk/shared';
+import { LEADERBOARD_SIZE, PROTOCOL_VERSION } from '@moonwalk/shared';
 import { PlayerState } from './PlayerState.js';
 
 /** One row of one board: who, and how much. */
@@ -50,6 +50,22 @@ const rows = (): ArraySchema<LeaderEntry> => {
  * fourteen things nobody is allowed to see.
  */
 export class CourseState extends Schema {
+  /**
+   * What this server can be asked for, as one number.
+   *
+   * IN THE STATE rather than behind an HTTP call, because the state is the one
+   * channel a client already has and it crosses origins without a CORS header:
+   * the client and the server are served from different hosts, so a `/health`
+   * probe is blocked by the browser before it is ever answered.
+   *
+   * An older server has no such field at all, which reads as `undefined` and
+   * is treated as protocol 1 - and that is precisely the case this exists for.
+   * See `PROTOCOL_VERSION`: a message an older server has no handler for does
+   * not fail, it CLOSES the connection, and a player who is not in a room
+   * earns nothing and is called nothing.
+   */
+  @type('uint8') protocol = PROTOCOL_VERSION;
+
   @type({ map: PlayerState }) players = new MapSchema<PlayerState>();
 
   /**

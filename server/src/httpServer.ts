@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server } from 'node:http';
-import { ROOM_NAME } from '@moonwalk/shared';
+import { PROTOCOL_VERSION, ROOM_NAME } from '@moonwalk/shared';
 import { buxGrants } from './bloxity/buxGrantsStore.js';
 import { BUX_WEBHOOK_PATH, processBuxWebhook } from './bloxity/buxWebhook.js';
 import { serverConfig } from './config/serverConfig.js';
@@ -32,8 +32,30 @@ export const createHttpServer = (): Server =>
     const url = (request.url ?? '').split('?')[0];
 
     if (url === '/health') {
-      response.writeHead(200, { 'Content-Type': 'application/json' });
-      response.end(JSON.stringify({ ok: true, room: ROOM_NAME }));
+      // Readable from anywhere: it carries a build number and nothing else,
+      // and an operator checking it from a browser tab on another origin is
+      // exactly who it is for.
+      response.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*',
+      });
+      /*
+       * The VERSION and the PROTOCOL, not just "ok".
+       *
+       * A health check that only says "up" cannot answer the question that
+       * actually costs days: which commit is this, and can it hear what my
+       * client is about to say? The client reads `protocol` here before it
+       * joins and holds back anything this server would not recognise - see
+       * `PROTOCOL_VERSION`.
+       */
+      response.end(
+        JSON.stringify({
+          ok: true,
+          room: ROOM_NAME,
+          version: serverConfig.buildVersion,
+          protocol: PROTOCOL_VERSION,
+        }),
+      );
       return;
     }
 

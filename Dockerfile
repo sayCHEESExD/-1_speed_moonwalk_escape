@@ -71,6 +71,13 @@ COPY --from=build /app/server/dist ./server/dist
 # when the last player leaves, so /data goes with them. Until a
 # `PersistenceAdapter` is written against a real database, progression on
 # Bloxity lasts only as long as a pod does - see the README.
+# The commit this image was built from, passed by the deploy workflow and
+# reported by /health. Without it a running container cannot say which build it
+# is - and a server sitting several deploys behind its client is invisible
+# until somebody reads the bundle by hand.
+ARG BUILD_VERSION=unknown
+ENV MOONWALK_BUILD=${BUILD_VERSION}
+
 ENV MOONWALK_DATA_DIR=/data
 VOLUME ["/data"]
 

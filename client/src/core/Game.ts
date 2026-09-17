@@ -721,6 +721,28 @@ export class Game {
     const token = this.bloxity.getToken();
     const state = this.network.playerState(this.network.sessionId ?? '');
     const report = {
+      /*
+       * The flat summary first, in the shape the operator asked for: one glance
+       * says which build, which server, whether it joined, who Bloxity thinks
+       * this is, what was sent, what came back, and whether progression moved.
+       * The grouped detail below stays for tracing a specific link.
+       */
+      buildVersion: clientConfig.buildVersion,
+      serverBuild: this.network.build,
+      serverUrl: clientConfig.serverUrl || '(none configured)',
+      connectionStatus: this.network.connectionStatus,
+      inRoom: this.network.inRoom,
+      roomId: this.network.roomId,
+      sessionId: this.network.sessionId ?? '',
+      authenticated: this.bloxity.isLoggedIn(),
+      bloxityName: user?.displayName ?? '',
+      bloxityUsername: user?.username ?? '',
+      bloxityIsGuest: user?.isGuest === true,
+      identitySentToServer: this.lastIdentity.split('\u0000')[0] ?? '',
+      replicatedPlayerName: state?.displayName ?? '',
+      totalSpeed: state ? Math.round(state.totalSpeed) : null,
+      level: state?.level ?? null,
+      maxLevel: state?.maxLevel ?? null,
       sdk: {
         scriptPresent: this.bloxity.available,
         initialised: this.bloxity.initialised,

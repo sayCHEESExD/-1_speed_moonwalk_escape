@@ -93,6 +93,12 @@ export interface NetLeaderboardState {
 }
 
 export interface NetCourseState {
+  /**
+   * What the server can be asked for. ABSENT on a server older than the
+   * client, which is exactly how the client knows to hold messages back -
+   * see `PROTOCOL_VERSION`.
+   */
+  protocol?: number;
   players: MapSchema<NetPlayerState>;
   /** The clock every disco ball is a pure function of. */
   elapsed: number;
