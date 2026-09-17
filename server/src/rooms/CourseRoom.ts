@@ -5,6 +5,8 @@ import {
   PlayerAnimationState,
   SPAWN_POSITION,
   SPAWN_ROTATION_Y,
+  type AvatarLookMessage,
+  type BloxityIdentityMessage,
   type BuyUpgradeMessage,
   type ClaimStageMessage,
   type MoveMessage,
@@ -13,6 +15,8 @@ import {
   type RespawnReason,
   type StageAwardedMessage,
 } from '@moonwalk/shared';
+import { buxGrants } from '../bloxity/buxGrantsStore.js';
+import { verifyBloxityToken } from '../bloxity/bloxityIdentity.js';
 import { serverConfig } from '../config/serverConfig.js';
 import { MovementService } from '../movement/MovementService.js';
 import { leaderboardService } from '../progression/LeaderboardService.js';
@@ -21,6 +25,7 @@ import { RebirthService } from '../progression/RebirthService.js';
 import { SpeedService } from '../progression/SpeedService.js';
 import { StageService } from '../progression/StageService.js';
 import { UpgradeService } from '../progression/UpgradeService.js';
+import { wallet } from '../progression/Wallet.js';
 import { logger } from '../util/logger.js';
 import { CourseState } from './state/CourseState.js';
 import { PlayerState } from './state/PlayerState.js';
@@ -33,6 +38,8 @@ const AUTOSAVE_SECONDS = 15;
 /** Options a client may pass on join. Identity only. */
 interface JoinOptions {
   playerId?: string;
+  /** A Bloxity token, verified with Bloxity. Never an id. */
+  bloxityToken?: string;
 }
 
 /**
@@ -74,6 +81,17 @@ export class CourseRoom extends Room<CourseState> {
   /** Browser-stored player id per session, for persistence. */
   private readonly playerIds = new Map<string, string>();
 
+  /**
+   * VERIFIED Bloxity account id per session, for Bux fulfilment.
+   *
+   * Only ever written from a token Bloxity itself resolved, so a grant can only
+   * reach the account that paid for it.
+   */
+  private readonly bloxityIds = new Map<string, string>();
+
+  /** Latest identity check per session, so a stale verification cannot win a race. */
+  private readonly identityChecks = new Map<string, number>();
+
   private autosaveTimer = 0;
 
   override onCreate(): void {
@@ -97,6 +115,21 @@ export class CourseRoom extends Room<CourseState> {
         this.respawn(client, message?.reason === 'guard' ? 'guard' : 'manual'),
     );
     this.onMessage(MessageType.Rebirth, (client) => this.onRebirth(client));
+    this.onMessage(MessageType.BloxityIdentity, (client, message: BloxityIdentityMessage) =>
+      this.resolveIdentity(client.sessionId, typeof message?.token === 'string' ? message.token : ''),
+    );
+    /*
+     * The one message whose contents are replicated rather than decided.
+     *
+     * A look is pure presentation and the server has no way to ask Bloxity
+     * what somebody else's character wears, so it takes the sender's word for
+     * it - laundered by `AvatarState.apply`, which is what stops an id
+     * becoming an arbitrary URL on fifteen other machines. Nothing here can
+     * reach progression.
+     */
+    this.onMessage(MessageType.AvatarLook, (client, message: AvatarLookMessage) => {
+      this.state.players.get(client.sessionId)?.avatar.apply(message);
+    });
 
     this.setSimulationInterval(
       (deltaMs) => this.tick(deltaMs / 1000),
@@ -156,6 +189,11 @@ export class CourseRoom extends Room<CourseState> {
     // has to be re-derived from the Speed it came back with.
     if (restored) this.speeds.syncDerived(player);
 
+    // In the background: a join must not wait on a round trip to Bloxity.
+    if (typeof options.bloxityToken === 'string' && options.bloxityToken) {
+      this.resolveIdentity(client.sessionId, options.bloxityToken);
+    }
+
     // Put the player at spawn through the SAME path a respawn takes, so there
     // is one definition of "where a player belongs" rather than two.
     this.placeAt(client, player, 'join');
@@ -176,6 +214,8 @@ export class CourseRoom extends Room<CourseState> {
     this.movement.forget(client.sessionId);
     this.speeds.forget(client.sessionId);
     this.playerIds.delete(client.sessionId);
+    this.bloxityIds.delete(client.sessionId);
+    this.identityChecks.delete(client.sessionId);
 
     logger.info(SCOPE, `leave ${client.sessionId}`);
   }
@@ -303,6 +343,11 @@ export class CourseRoom extends Room<CourseState> {
       this.playerIds,
     );
 
+    // Bux bought by someone already in the room. One boolean in the common case.
+    if (buxGrants.hasPending) {
+      for (const [sessionId, player] of this.state.players) this.applyGrants(sessionId, player);
+    }
+
     for (const [sessionId, player] of this.state.players) {
       if (!player.ready) continue;
 
@@ -328,6 +373,65 @@ export class CourseRoom extends Room<CourseState> {
         this.persist(sessionId, player);
       }
     }
+  }
+
+  /**
+   * Resolve a Bloxity token to an account, then hand over anything it bought.
+   *
+   * An empty token is a logout. Every call supersedes the one before it, so a
+   * slow verification of an old token can never overwrite a newer answer.
+   */
+  private resolveIdentity(sessionId: string, token: string): void {
+    const check = (this.identityChecks.get(sessionId) ?? 0) + 1;
+    this.identityChecks.set(sessionId, check);
+
+    if (!token) {
+      this.bloxityIds.delete(sessionId);
+      const player = this.state.players.get(sessionId);
+      if (player) {
+        player.displayName = '';
+        player.avatarUrl = '';
+      }
+      return;
+    }
+
+    void verifyBloxityToken(token, serverConfig.bloxityApiBase).then((user) => {
+      if (this.identityChecks.get(sessionId) !== check) return;
+      const player = this.state.players.get(sessionId);
+      if (!player) return;
+      if (!user) {
+        this.bloxityIds.delete(sessionId);
+        player.displayName = '';
+        player.avatarUrl = '';
+        return;
+      }
+      this.bloxityIds.set(sessionId, user.id);
+      // The name every other client shows above this character and on the
+      // boards. It is set HERE, from a profile Bloxity resolved, and nowhere
+      // else - a name a client could assert would be a name it could borrow.
+      player.displayName = user.displayName || user.username;
+      player.avatarUrl = user.avatarUrl;
+      logger.info(SCOPE, `${sessionId} verified as Bloxity @${user.username}`);
+      this.applyGrants(sessionId, player);
+    });
+  }
+
+  /**
+   * Hand over purchases waiting for this player's verified account.
+   *
+   * Through `wallet.add` like every other award - there is one place Wins move -
+   * and saved immediately, so a crash before the next autosave cannot lose them.
+   */
+  private applyGrants(sessionId: string, player: PlayerState): void {
+    const bloxityId = this.bloxityIds.get(sessionId);
+    if (!bloxityId) return;
+    const grants = buxGrants.drain(bloxityId);
+    if (grants.length === 0) return;
+    for (const grant of grants) {
+      wallet.add(player, grant.wins);
+      logger.info(SCOPE, `granted ${grant.sku} to ${sessionId} (+${grant.wins} wins) [${grant.transactionId}]`);
+    }
+    this.persist(sessionId, player);
   }
 
   /** Put a player back at the arena and tell them so. */

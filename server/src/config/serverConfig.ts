@@ -10,6 +10,16 @@ export interface ServerConfig {
   readonly patchRateMs: number;
   /** Directory holding persisted player profiles. */
   readonly dataDir: string;
+  /**
+   * Shared secret Bloxity sends as `x-legion-webhook-secret`. Without one the
+   * Bux webhook REFUSES every delivery (so Bloxity refunds), because an
+   * unauthenticated endpoint would grant Wins to anybody who found it.
+   */
+  readonly buxWebhookSecret: string;
+  /** Accept unsigned webhooks when no secret is set. Local development only. */
+  readonly buxAllowUnsigned: boolean;
+  /** Bloxity's API, for verifying player tokens. */
+  readonly bloxityApiBase: string;
 }
 
 const int = (value: string | undefined, fallback: number): number => {
@@ -40,4 +50,7 @@ export const serverConfig: ServerConfig = {
   // Relative to the server package, which is the working directory for both
   // `npm run dev` and `npm start`, so a restart finds the same file either way.
   dataDir: resolve(process.env['MOONWALK_DATA_DIR'] ?? 'data'),
+  buxWebhookSecret: process.env['BLOXITY_WEBHOOK_SECRET'] ?? '',
+  buxAllowUnsigned: process.env['BLOXITY_WEBHOOK_ALLOW_UNSIGNED'] === '1',
+  bloxityApiBase: (process.env['BLOXITY_API_BASE'] ?? 'https://api.bloxity.io').replace(/\/+$/, ''),
 };

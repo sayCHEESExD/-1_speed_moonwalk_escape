@@ -118,6 +118,11 @@ export class Scoreboard {
   /** So the "no leaderboard" complaint is made once, not sixty times a second. */
   private warnedMissing = false;
 
+  /** Profile pictures, shared by all three boards - one player is on several. */
+  private readonly portraits = new PortraitCache(() => {
+    for (const panel of this.panels) panel.redraw();
+  });
+
   constructor() {
     // Hard against the back wall, facing down the arena at the spawn point.
     //
@@ -189,7 +194,7 @@ export class Scoreboard {
 
       // The panel itself: one plane carrying a canvas that is redrawn whenever
       // the standings change.
-      const surface = new PanelSurface(spec, BOARD.width, BOARD.height);
+      const surface = new PanelSurface(spec, BOARD.width, BOARD.height, this.portraits);
       surface.mesh.position.set(0, midY, BOARD.depth / 2 + 0.02);
       group.add(surface.mesh);
       this.panels.push(surface);
@@ -253,6 +258,7 @@ export class Scoreboard {
   }
 
   dispose(): void {
+    this.portraits.dispose();
     for (const panel of this.panels) panel.dispose();
     for (const sign of this.signs) sign.dispose();
     for (const geometry of this.geometries) geometry.dispose();
@@ -299,6 +305,9 @@ class PanelSurface {
   readonly category: Category;
 
   private readonly spec: BoardSpec;
+  private readonly portraits: PortraitCache;
+  /** The rows last drawn, so a picture arriving late can be drawn onto them. */
+  private rows: readonly NetLeaderEntry[] = [];
   private readonly canvas: HTMLCanvasElement;
   private readonly texture: CanvasTexture;
   private readonly material: MeshBasicMaterial;
@@ -310,8 +319,9 @@ class PanelSurface {
   /** The line shown instead of rows when nothing is ranked yet. */
   private placeholder = 'No scores yet';
 
-  constructor(spec: BoardSpec, width: number, height: number) {
+  constructor(spec: BoardSpec, width: number, height: number, portraits: PortraitCache) {
     this.spec = spec;
+    this.portraits = portraits;
     this.category = spec.category;
 
     this.canvas = document.createElement('canvas');
@@ -332,11 +342,18 @@ class PanelSurface {
   }
 
   apply(rows: readonly NetLeaderEntry[]): void {
-    const signature = rows.map((row) => `${row.handle}:${row.value}`).join('|');
+    const signature = rows.map((row) => `${row.name}/${row.avatar}:${row.value}`).join('|');
     if (signature === this.signature && this.placeholder === 'No scores yet') return;
     this.signature = signature;
     this.placeholder = 'No scores yet';
+    this.rows = rows;
     this.draw(rows);
+    this.texture.needsUpdate = true;
+  }
+
+  /** Draw the same standings again, e.g. once a profile picture has arrived. */
+  redraw(): void {
+    this.draw(this.rows);
     this.texture.needsUpdate = true;
   }
 
@@ -392,9 +409,14 @@ class PanelSurface {
     const rowTop = headerH;
     const rowH = (height - headerH - pad * 0.6) / LEADERBOARD_SIZE;
     const rankX = pad;
-    const handleX = pad + width * 0.13;
+    // A row reads: rank, picture, name, figure. The picture sits between the
+    // rank and the name rather than at the edge, so the medal colours still
+    // line up down the left of the board.
+    const portraitR = rowH * 0.36;
+    const portraitX = pad + width * 0.14 + portraitR;
+    const nameX = portraitX + portraitR * 1.45;
     const valueRight = width - pad;
-    const handleRoom = valueRight - handleX - width * 0.2;
+    const nameRoom = valueRight - nameX - width * 0.2;
 
     /*
      * An empty board has to LOOK empty on purpose.
@@ -405,7 +427,7 @@ class PanelSurface {
      * one has scored yet" and "this feature is dead", and on a newly deployed
      * server the first is what is actually true.
      */
-    if (!rows.some((row) => row && row.handle)) {
+    if (!rows.some((row) => row && row.name)) {
       ctx.textAlign = 'center';
       ctx.fillStyle = PALETTE.boardHeading;
       fitText(ctx, this.placeholder, width - pad * 2, rowH * 0.62);
@@ -426,7 +448,7 @@ class PanelSurface {
         ctx.fillStyle = PALETTE.boardStripe;
         ctx.fillRect(pad * 0.4, rowTop + rowH * i, width - pad * 0.8, rowH);
       }
-      if (!row || !row.handle) continue;
+      if (!row || !row.name) continue;
 
       ctx.textAlign = 'left';
       ctx.lineWidth = size * 0.16;
@@ -439,14 +461,18 @@ class PanelSurface {
       ctx.strokeText(rank, rankX, centreY);
       ctx.fillText(rank, rankX, centreY);
 
-      // Handle, shrunk to fit the space between the rank and the figure. It is
-      // the one field whose length is not ours to choose, so it is the one
-      // that has to give - and the figure beside it must never be pushed off
-      // the board by a long name.
-      fitText(ctx, row.handle, handleRoom, size, 'left');
+      // Their Bloxity picture, or a disc while it is still loading.
+      drawPortrait(ctx, this.portraits.get(row.avatar), portraitX, centreY, portraitR);
+
+      // The name, shrunk to fit the space between the picture and the figure.
+      // It is the one field whose length is not ours to choose - a display
+      // name is whatever its owner typed - so it is the one that has to give,
+      // and the figure beside it must never be pushed off the board by it.
+      ctx.textAlign = 'left';
+      fitText(ctx, row.name, nameRoom, size, 'left');
       ctx.fillStyle = PALETTE.boardName;
-      ctx.strokeText(row.handle, handleX, centreY);
-      ctx.fillText(row.handle, handleX, centreY);
+      ctx.strokeText(row.name, nameX, centreY);
+      ctx.fillText(row.name, nameX, centreY);
 
       // The figure, right-aligned so the column reads down the page.
       const text = this.format(row.value);
@@ -491,4 +517,85 @@ const fitText = (
   }
   ctx.font = `900 ${size}px ${FONT}`;
   ctx.lineWidth = size * 0.16;
+};
+
+/**
+ * Profile pictures for the boards.
+ *
+ * Bloxity's CDN, requested anonymously and drawn into the panel canvas. A row
+ * shows the PLAYER - their picture beside their display name - which is why
+ * the picture is worth a network request at all; a generic silhouette beside
+ * every name would say nothing the name did not.
+ *
+ * Cached by URL, the failures included: nine rows on three boards are
+ * twenty-seven lookups every couple of seconds, and a picture that 404s must
+ * not be re-requested for the life of the session. `crossOrigin` is set
+ * because an image drawn without it TAINTS the canvas, and a tainted canvas
+ * cannot be read back - which is how several of this game's textures are made.
+ */
+class PortraitCache {
+  private readonly images = new Map<string, HTMLImageElement | null>();
+  private readonly onLoaded: () => void;
+
+  constructor(onLoaded: () => void) {
+    this.onLoaded = onLoaded;
+  }
+
+  /** The picture for this URL, or null while it loads - or forever, if it cannot. */
+  get(url: string): HTMLImageElement | null {
+    if (!url) return null;
+    const cached = this.images.get(url);
+    if (cached !== undefined) return cached;
+
+    this.images.set(url, null);
+    const image = new Image();
+    image.crossOrigin = 'anonymous';
+    image.onload = () => {
+      this.images.set(url, image);
+      // The board was drawn without it; draw it again now it is here.
+      this.onLoaded();
+    };
+    image.onerror = () => {
+      logger.warn(SCOPE, `profile picture failed to load: ${url}`);
+      this.images.set(url, null);
+    };
+    image.src = url;
+    return null;
+  }
+
+  dispose(): void {
+    this.images.clear();
+  }
+}
+
+/**
+ * One row's portrait: the picture if it is here, a plain disc if it is not.
+ *
+ * The disc is deliberately not an icon of a person. It stands in for a picture
+ * still in flight, and an icon would read as "this player has no picture",
+ * which is a different and usually untrue statement.
+ */
+const drawPortrait = (
+  ctx: CanvasRenderingContext2D,
+  image: HTMLImageElement | null,
+  centreX: number,
+  centreY: number,
+  radius: number,
+): void => {
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(centreX, centreY, radius, 0, Math.PI * 2);
+  ctx.closePath();
+  ctx.fillStyle = PALETTE.boardStripe;
+  ctx.fill();
+  if (image) {
+    ctx.clip();
+    ctx.drawImage(image, centreX - radius, centreY - radius, radius * 2, radius * 2);
+  }
+  ctx.restore();
+  ctx.beginPath();
+  ctx.arc(centreX, centreY, radius, 0, Math.PI * 2);
+  ctx.lineWidth = radius * 0.16;
+  ctx.strokeStyle = PALETTE.boardPanelEdge;
+  ctx.stroke();
 };

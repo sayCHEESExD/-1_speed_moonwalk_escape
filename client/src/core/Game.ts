@@ -1,7 +1,14 @@
-import { stageAt, type RespawnMessage, type StageAwardedMessage } from '@moonwalk/shared';
+import {
+  stageAt,
+  type AvatarLook,
+  type RespawnMessage,
+  type StageAwardedMessage,
+} from '@moonwalk/shared';
 import { Vector3 } from 'three';
 import { AudioManager } from '../audio/AudioManager.js';
 import { PlayerAudio } from '../audio/PlayerAudio.js';
+import { Bloxity } from '../bloxity/Bloxity.js';
+import { BloxityAvatar } from '../bloxity/BloxityAvatar.js';
 import { ThirdPersonCamera } from '../camera/ThirdPersonCamera.js';
 import { clientConfig } from '../config/clientConfig.js';
 import { Guard } from '../guard/Guard.js';
@@ -9,11 +16,13 @@ import { InputManager } from '../input/InputManager.js';
 import { NetworkClient } from '../net/NetworkClient.js';
 import type { ConnectionStatus, NetPlayerState } from '../net/netTypes.js';
 import { LocalPlayer } from '../player/LocalPlayer.js';
+import { NamePlate } from '../player/NamePlate.js';
 import { playerModelLoader, type PlayerModelReport } from '../player/PlayerModelLoader.js';
 import { RemotePlayerManager } from '../player/RemotePlayerManager.js';
 import { RunController } from '../progression/RunController.js';
 import { RendererManager } from '../rendering/RendererManager.js';
 import { SceneManager } from '../rendering/SceneManager.js';
+import { BloxityPanel } from '../ui/BloxityPanel.js';
 import { MonsterWarning } from '../ui/MonsterWarning.js';
 import { Panel, anyPanelOpen } from '../ui/Panel.js';
 import { RailButton } from '../ui/RailButton.js';
@@ -28,6 +37,13 @@ import { logger } from '../util/logger.js';
 import { CourseWorld } from '../world/CourseWorld.js';
 
 const SCOPE = 'Game';
+
+/**
+ * Milliseconds after our own join during which a remote player counts as
+ * already HERE rather than as arriving - the difference between Bloxity's
+ * "friend is in this room" and "friend just joined" toasts.
+ */
+const IN_ROOM_WINDOW_MS = 2500;
 
 /**
  * Which shortcut a key event means, or '' for none.
@@ -77,6 +93,11 @@ const WIN_FLIGHT_ORIGIN = new Vector3();
  * transform the hazard test used - and a player who died to a disco ball on
  * the same frame the guard arrived is killed by the ball, which is the one the
  * server can confirm.
+ *
+ * BLOXITY is composed here and nowhere else. The renderer, audio, input and
+ * network are handed to it as plain callbacks through `BloxityHost`, so none of
+ * them imports the SDK and the whole integration degrades to nothing if the
+ * script is blocked.
  */
 export class Game {
   private readonly renderer: RendererManager;
@@ -100,6 +121,24 @@ export class Game {
   private readonly network: NetworkClient;
   private readonly world = new CourseWorld();
   private readonly run: RunController;
+
+  private readonly bloxity: Bloxity;
+  private readonly bloxityPanel: BloxityPanel;
+  /** Cosmetics on the local character. Built once the model exists. */
+  private bloxityAvatar: BloxityAvatar | null = null;
+  /** The latest look, held until the character is built. */
+  /** A look that arrived before there was a character to put it on. */
+  private pendingLook: AvatarLook | null = null;
+  /** The local player's own name, over their own character. */
+  private plate: NamePlate | null = null;
+  /** Remote players already announced to Bloxity, so a name is toasted once. */
+  private readonly announced = new Set<string>();
+  private joinedAt = 0;
+
+  /** The portal's `show_fps` readout. */
+  private readonly fpsReadout: HTMLDivElement;
+  private fpsAccum = 0;
+  private fpsFrames = 0;
 
   /**
    * THE guard, and there is exactly one because there is exactly one local
@@ -180,6 +219,11 @@ export class Game {
 
     this.playerAudio = new PlayerAudio(this.audio);
 
+    this.fpsReadout = document.createElement('div');
+    this.fpsReadout.className = 'mwe-fps mwe-font';
+    this.fpsReadout.hidden = true;
+    container.appendChild(this.fpsReadout);
+
     window.addEventListener('keydown', this.onHotkey);
     // Audio can only start on a real gesture, and no single one of them is
     // guaranteed to be the one the browser accepts - so every gesture asks,
@@ -194,10 +238,19 @@ export class Game {
       onStatusChange: (status) => this.onStatusChange(status),
       onSelfJoined: (sessionId) => {
         this.localSessionId = sessionId;
+        this.joinedAt = performance.now();
+        // Published as soon as the room is joinable, so an invite lands the
+        // friend in THIS room rather than merely in the game.
+        const roomId = this.network.roomId;
+        this.bloxity.updateRoom(roomId);
+        this.bloxityPanel.setRoom(roomId);
       },
       onPlayerAdded: (sessionId, player) => this.onPlayerAdded(sessionId, player),
       onPlayerChanged: (sessionId, player) => this.onPlayerChanged(sessionId, player),
-      onPlayerRemoved: (sessionId) => this.remotePlayers.remove(sessionId),
+      onPlayerRemoved: (sessionId) => {
+        this.announced.delete(sessionId);
+        this.remotePlayers.remove(sessionId);
+      },
       onRespawn: (message) => {
         // The server's authoritative respawn. HELD rather than applied at once:
         // the client is usually mid-animation, and the whole point of the death
@@ -208,6 +261,42 @@ export class Game {
       },
       onStageAwarded: (message) => this.onStageAwarded(message),
     });
+
+    /*
+     * The Bloxity bridge. Everything Bloxity can change about the game arrives
+     * through these callbacks, and nothing else in the codebase imports the SDK.
+     */
+    this.bloxity = new Bloxity({
+      setMasterVolume: (level) => this.audio.setMasterVolume(level),
+      setMusicVolume: (level) => this.audio.setMusicVolume(level),
+      setGraphicsQuality: (level) => this.renderer.setQuality(level),
+      setShowFps: (show) => {
+        this.fpsReadout.hidden = !show;
+      },
+      setCameraSensitivity: (scale) => this.input.look.setSensitivityScale(scale),
+      // The portal asks; the SERVER still decides where anyone is placed.
+      respawn: () => {
+        if (!this.localPlayer?.isDying) this.network.requestRespawn('manual');
+      },
+      pointerLockChanged: (locked) => this.input.look.setCursorFree(!locked),
+      /*
+       * ONE look, three destinations: the local character wears it, the server
+       * replicates it so every other player draws this player correctly, and
+       * the panel redraws its sliders. There is no second source for any of
+       * the three - what Bloxity says is what all of them get.
+       */
+      lookChanged: (look) => {
+        if (this.bloxityAvatar) this.bloxityAvatar.apply(look);
+        else this.pendingLook = look;
+        this.network.sendAvatarLook(look);
+        this.bloxityPanel.refreshAvatar();
+      },
+      // A login or logout after joining. Before joining this is a no-op and
+      // the join itself carries the token.
+      identityChanged: (_user, token) => this.network.sendIdentity(token),
+    });
+    this.network.setIdentityProvider(() => this.bloxity.getToken());
+    this.bloxityPanel = new BloxityPanel(container, this.bloxity);
 
     this.run = new RunController(this.world.collision, {
       claimStage: (index) => {
@@ -258,7 +347,10 @@ export class Game {
         // The browser releases the lock on Escape whatever the page wants, so
         // this only closes whatever was open - `MouseLook` handles the cursor.
         for (const panel of [this.rebirthPanel, this.upgradePanel]) panel.setOpen(false);
+        this.bloxityPanel.closeAll();
         this.input.look.setCursorFree(true);
+        // Embedded, the portal owns the pause menu; standalone this is a no-op.
+        if (this.bloxity.embedded) this.bloxity.showPortalMenu(true);
         break;
       default:
         break;
@@ -280,7 +372,23 @@ export class Game {
     for (const other of [this.rebirthPanel, this.upgradePanel]) {
       if (other !== panel) other.setOpen(false);
     }
+    this.bloxityPanel.closeAll();
     panel.toggle();
+  }
+
+  /**
+   * Initialise Bloxity.
+   *
+   * Called before anything loads, because the portal's loading screen is fed
+   * by `loadingStep` and has to be listening before there is anything to report.
+   */
+  startBloxity(): void {
+    this.bloxity.start();
+  }
+
+  /** Progress, for the portal's loading screen. */
+  loadingStep(text: string): void {
+    this.bloxity.loadingStep(text);
   }
 
   /** Load assets and build the world. Networking is started separately. */
@@ -295,6 +403,22 @@ export class Game {
     this.camera.snapTo(this.localPlayer.position);
     this.guard.placeBehind(this.localPlayer.position, this.localPlayer.rotationY);
 
+    /*
+     * Cosmetics on the LOCAL character, built AFTER the bundled model exists
+     * and bound to it - so the Bloxity body replaces the bundled one and never
+     * the other way round. A look that arrived while the FBX was still loading
+     * was parked in `pendingLook` for exactly this moment; without that, a
+     * player whose avatar resolved quickly would have been dressed into a
+     * character that did not exist yet, and would then have kept the bundled
+     * texture for the whole session.
+     */
+    this.bloxityAvatar = new BloxityAvatar(this.localPlayer.character);
+    this.plate = new NamePlate(this.localPlayer.character.root);
+    const look = this.pendingLook ?? this.bloxity.getLook();
+    this.pendingLook = null;
+    this.bloxityAvatar.apply(look);
+    this.network.sendAvatarLook(look);
+
     logger.info(SCOPE, 'world ready');
     return this.modelReport;
   }
@@ -306,10 +430,16 @@ export class Game {
 
   start(): void {
     this.input.attach(this.renderer.renderer.domElement);
+    // The loading screen comes down and the session begins.
+    this.bloxity.loadingEnd();
+    this.bloxity.gameplayStart();
   }
 
   stop(): void {
     this.input.detach();
+    this.bloxity.gameplayEnd();
+    // Out of the room, so a friend is not invited into a game nobody is in.
+    this.bloxity.updateRoom('');
     void this.network.disconnect();
   }
 
@@ -378,8 +508,20 @@ export class Game {
     this.world.update(delta, elapsed);
     this.remotePlayers.advance(delta);
     this.camera.update(delta, player?.horizontalSpeed ?? 0);
+    this.tickFps(delta);
 
     this.renderer.renderer.render(this.sceneManager.scene, this.camera.camera);
+  }
+
+  /** The `show_fps` readout, averaged over half a second so it is readable. */
+  private tickFps(delta: number): void {
+    if (this.fpsReadout.hidden) return;
+    this.fpsAccum += delta;
+    this.fpsFrames += 1;
+    if (this.fpsAccum < 0.5) return;
+    this.fpsReadout.textContent = `${Math.round(this.fpsFrames / this.fpsAccum)} FPS`;
+    this.fpsAccum = 0;
+    this.fpsFrames = 0;
   }
 
   /**
@@ -475,6 +617,7 @@ export class Game {
       return;
     }
     this.remotePlayers.add(sessionId, state);
+    this.announce(sessionId, state);
   }
 
   private onPlayerChanged(sessionId: string, state: NetPlayerState): void {
@@ -483,6 +626,24 @@ export class Game {
       return;
     }
     this.remotePlayers.update(sessionId, state);
+    // A verified name arrives a moment after the player does.
+    this.announce(sessionId, state);
+  }
+
+  /**
+   * Tell Bloxity who is here, once per player, by their Bloxity name.
+   *
+   * Only players whose name the SERVER verified are announced - a guest has no
+   * Bloxity identity for the portal to match against the friends list.
+   */
+  private announce(sessionId: string, state: NetPlayerState): void {
+    if (!state.displayName || this.announced.has(sessionId)) return;
+    this.announced.add(sessionId);
+    if (performance.now() - this.joinedAt < IN_ROOM_WINDOW_MS) {
+      this.bloxity.playerInRoom(state.displayName);
+    } else {
+      this.bloxity.playerJoined(state.displayName);
+    }
   }
 
   /**
@@ -495,6 +656,11 @@ export class Game {
   private applyLocalState(state: NetPlayerState): void {
     const player = this.localPlayer;
     if (!player) return;
+
+    // The server's verified answer to who this is - the same field every other
+    // client reads for this player, so nobody sees a different name to anybody
+    // else, this player included.
+    this.plate?.setName(state.displayName);
 
     player.setMovementProfile(state.moveMultiplier, state.jumpVelocity);
 
@@ -611,6 +777,11 @@ export class Game {
     this.audioButton.dispose();
     this.rebirthPanel.dispose();
     this.upgradePanel.dispose();
+    this.bloxityPanel.dispose();
+    this.plate?.dispose();
+    this.bloxityAvatar?.dispose();
+    this.bloxity.dispose();
+    this.fpsReadout.remove();
     this.rail.remove();
     this.guard.dispose();
     this.remotePlayers.dispose();

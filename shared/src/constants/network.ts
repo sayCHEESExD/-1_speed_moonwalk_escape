@@ -60,6 +60,20 @@ export const MessageType = {
    * is met.
    */
   Rebirth: 'rebirth',
+  /**
+   * Client -> server: "my Bloxity token is now this" (login or logout mid-session).
+   * The server verifies it with Bloxity; it never trusts an id from a client.
+   */
+  BloxityIdentity: 'bloxityIdentity',
+  /**
+   * Client -> server: "this is what my character looks like".
+   *
+   * APPEARANCE ONLY, and the one message whose contents the server replicates
+   * rather than decides. A look is what Bloxity says the player wears, which
+   * the server cannot ask Bloxity for on their behalf, and there is nothing to
+   * win by lying about a hat - so it is taken, clamped, and passed on.
+   */
+  AvatarLook: 'avatarLook',
 } as const;
 
 export type MessageType = (typeof MessageType)[keyof typeof MessageType];

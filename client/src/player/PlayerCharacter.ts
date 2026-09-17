@@ -35,7 +35,7 @@ export class PlayerCharacter {
   readonly root = new Group();
 
   readonly animator: PlayerAnimator;
-  readonly rig: PlayerRig;
+  private currentRig: PlayerRig;
 
   /**
    * The half-turn that makes the glide a moonwalk.
@@ -50,10 +50,13 @@ export class PlayerCharacter {
 
   private readonly tipPivot = new Group();
   private readonly visual = new Group();
-  private readonly model: Object3D;
+  /** The bundled `player.fbx` clone, kept so a Bloxity body can be taken off again. */
+  private readonly defaultModel: Object3D;
+  private model: Object3D;
 
   constructor() {
-    this.model = playerModelLoader.createInstance();
+    this.defaultModel = playerModelLoader.createInstance();
+    this.model = this.defaultModel;
 
     this.root.add(this.facing);
     this.facing.add(this.tipPivot);
@@ -66,8 +69,43 @@ export class PlayerCharacter {
 
     // Bind against the model's own space so the rig is independent of where
     // the character stands and of the half-turn above it.
-    this.rig = new PlayerRig(this.model, this.model);
-    this.animator = new PlayerAnimator(this.rig, this.tipPivot, this.visual);
+    this.currentRig = new PlayerRig(this.model, this.model);
+    this.animator = new PlayerAnimator(this.currentRig, this.tipPivot, this.visual);
+  }
+
+  get rig(): PlayerRig {
+    return this.currentRig;
+  }
+
+  /**
+   * Wear a different body, or null for the bundled one.
+   *
+   * The body goes into the SAME `visual` node, under the same moonwalk
+   * half-turn, and a fresh rig is bound to it by bone name - Bloxity's
+   * `player.glb` carries the twelve names `player.fbx` does, so the moonwalk
+   * and the jump drive it unchanged. Nothing above `visual` moves.
+   *
+   * @returns the model now worn
+   */
+  setModel(next: Object3D | null): Object3D {
+    const target = next ?? this.defaultModel;
+    if (target === this.model) return target;
+
+    const previous = this.model;
+    previous.removeFromParent();
+    if (previous !== this.defaultModel && previous.userData['bloxityBody'] === true) {
+      // A Bloxity body owns its material; its part geometry is cached and shared.
+      previous.traverse((child) => {
+        const material = (child as { material?: { dispose?: () => void } }).material;
+        material?.dispose?.();
+      });
+    }
+
+    this.model = target;
+    this.visual.add(target);
+    this.currentRig = new PlayerRig(target, target);
+    this.animator.setRig(this.currentRig);
+    return target;
   }
 
   /**

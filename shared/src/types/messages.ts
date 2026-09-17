@@ -1,3 +1,5 @@
+import type { AvatarLook } from '../config/avatar.js';
+
 /**
  * Client -> server input (MessageType.Move).
  *
@@ -91,6 +93,24 @@ export interface StageAwardedMessage {
  * there is nothing in this message that could be wrong.
  */
 export type RebirthMessage = Record<string, never>;
+
+/**
+ * Client -> server: the player's Bloxity token, after a login or logout.
+ *
+ * A TOKEN, not an id: the server resolves it with Bloxity, so nobody can claim
+ * another account's paid-for Bux grants by naming its id. Empty means logged out.
+ */
+/**
+ * What the sender's character wears, for everyone else to draw.
+ *
+ * Sanitised by the server with `sanitiseAvatarLook` before it reaches state:
+ * ids become URLs on every other client, and proportions become scales.
+ */
+export type AvatarLookMessage = AvatarLook;
+
+export interface BloxityIdentityMessage {
+  token: string;
+}
 
 /**
  * Client -> server: "put me back at the arena".

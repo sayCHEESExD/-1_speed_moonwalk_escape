@@ -1,4 +1,4 @@
-import { LEADERBOARD_SIZE, handleFor } from '@moonwalk/shared';
+import { GUEST_NAME, LEADERBOARD_SIZE } from '@moonwalk/shared';
 import type { LeaderEntry, LeaderboardState } from '../rooms/state/CourseState.js';
 import type { PlayerState } from '../rooms/state/PlayerState.js';
 import { profileStore } from './ProfileStore.js';
@@ -8,7 +8,10 @@ const REFRESH_SECONDS = 2;
 
 /** One candidate, before it is ranked. */
 interface Candidate {
-  readonly handle: string;
+  /** Their Bloxity display name, or `GUEST_NAME`. Never an id. */
+  readonly name: string;
+  /** Their Bloxity profile picture, or ''. */
+  readonly avatar: string;
   readonly wins: number;
   readonly speed: number;
   readonly rebirths: number;
@@ -54,11 +57,21 @@ export class LeaderboardService {
     live: Iterable<[string, PlayerState]>,
     playerIds: ReadonlyMap<string, string>,
   ): void {
-    const byHandle = new Map<string, Candidate>();
+    /*
+     * Keyed by the player ID, and shown by their NAME.
+     *
+     * Those are two different jobs and used to be one: the board keyed on a
+     * handle derived from the id, which made the displayed name load-bearing.
+     * A Bloxity display name is not unique - two people may both be "Chicken
+     * 877" - so keying on it would silently merge their totals. The id stays
+     * the key, stays on the server, and is never in a row.
+     */
+    const byPlayer = new Map<string, Candidate>();
 
     for (const [id, profile] of profileStore.entries()) {
-      byHandle.set(handleFor(id), {
-        handle: handleFor(id),
+      byPlayer.set(id, {
+        name: profile.displayName || GUEST_NAME,
+        avatar: profile.avatarUrl,
         wins: profile.wins,
         speed: profile.totalSpeed,
         rebirths: profile.rebirths,
@@ -69,16 +82,18 @@ export class LeaderboardService {
     for (const [sessionId, player] of live) {
       const id = playerIds.get(sessionId);
       if (!id) continue;
-      const handle = handleFor(id);
-      byHandle.set(handle, {
-        handle,
+      byPlayer.set(id, {
+        // A live player who has just signed in is named before their profile
+        // has been written back, so the live record wins here too.
+        name: player.displayName || profileStore.nameOf(id) || GUEST_NAME,
+        avatar: player.avatarUrl || profileStore.avatarOf(id),
         wins: player.wins,
         speed: player.totalSpeed,
         rebirths: player.rebirths,
       });
     }
 
-    const all = [...byHandle.values()];
+    const all = [...byPlayer.values()];
     fill(board.wins, all, (c) => c.wins);
     fill(board.speed, all, (c) => c.speed);
     fill(board.rebirths, all, (c) => c.rebirths);
@@ -107,11 +122,13 @@ const fill = (
     const entry = into[i];
     if (!entry) continue;
     const candidate = ranked[i];
-    const handle = candidate ? candidate.handle : '';
+    const name = candidate ? candidate.name : '';
+    const avatar = candidate ? candidate.avatar : '';
     const value = candidate ? Math.floor(pick(candidate)) : 0;
     // Assign only on a real change, for the same reason as above: an identical
     // write still counts as a change to the schema encoder.
-    if (entry.handle !== handle) entry.handle = handle;
+    if (entry.name !== name) entry.name = name;
+    if (entry.avatar !== avatar) entry.avatar = avatar;
     if (entry.value !== value) entry.value = value;
   }
 };

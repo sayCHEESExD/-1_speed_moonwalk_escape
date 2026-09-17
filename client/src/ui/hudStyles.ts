@@ -748,6 +748,21 @@ body.mwe-touch-mode .mwe-rail { --mwe-rail: 62px; }
 }
 .mwe-shop__row--owned .mwe-shop__status { color: #8affc0; }
 
+/* Bloxity avatar panel: the head matches the other account panels. */
+.mwe-panel--avatar .mwe-panel__head {
+  background: linear-gradient(90deg, #ff2d78, #a855f7);
+}
+.mwe-slider {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+.mwe-slider input { width: 100%; accent-color: #ff2d78; }
+.mwe-panel--avatar .mwe-action,
+.mwe-panel--friends .mwe-action { margin-top: 8px; }
+
 /*
  * "THE MONSTER IS COMING".
  *

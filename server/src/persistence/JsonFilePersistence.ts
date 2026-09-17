@@ -73,6 +73,8 @@ export class JsonFilePersistence implements PersistenceAdapter {
           ownedTiers: numeric(value.ownedTiers),
           rebirths: numeric(value.rebirths),
           bestStage: numeric(value.bestStage),
+          displayName: text(value.displayName),
+          avatarUrl: text(value.avatarUrl),
           updatedAt: numeric(value.updatedAt),
         });
       }
@@ -179,6 +181,17 @@ export class JsonFilePersistence implements PersistenceAdapter {
     }
   }
 }
+
+/**
+ * A stored string, bounded.
+ *
+ * Names and picture URLs are the only free text in a profile and the only
+ * fields that came from outside this server. A save file is editable by
+ * whoever can reach the disk, so the length cap is applied on the way IN as
+ * well as on the way out.
+ */
+const text = (value: unknown, limit = 200): string =>
+  typeof value === 'string' ? value.slice(0, limit) : '';
 
 const numeric = (value: unknown): number =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;

@@ -7,6 +7,7 @@ import {
   STARTER_TIER_SLOT,
   type PlayerAnimationState as AnimationState,
 } from '@moonwalk/shared';
+import { AvatarState } from './AvatarState.js';
 
 /**
  * Replicated per-player state.
@@ -22,6 +23,32 @@ import {
  */
 export class PlayerState extends Schema {
   @type('string') sessionId = '';
+
+  /**
+   * The player's Bloxity display name, or '' when signed out or unverified.
+   *
+   * Set by the SERVER from a token it verified with Bloxity - never copied
+   * from a client - and replicated so other clients can announce a friend
+   * joining by name.
+   */
+  @type('string') displayName = '';
+
+  /**
+   * The player's Bloxity profile picture, or '' when unknown.
+   *
+   * Set by the SERVER from the same verified profile the name comes from, and
+   * replicated for the same reason: a board row shows who a player IS, and a
+   * name the server verified beside a picture a client chose would be half an
+   * identity.
+   */
+  @type('string') avatarUrl = '';
+
+  /**
+   * What this player's character wears. See `AvatarState` - it is the one
+   * field in here whose contents came from a client, and it is laundered
+   * before it lands.
+   */
+  @type(AvatarState) avatar = new AvatarState();
 
   @type('float32') x: number = SPAWN_POSITION.x;
   @type('float32') y: number = SPAWN_POSITION.y;

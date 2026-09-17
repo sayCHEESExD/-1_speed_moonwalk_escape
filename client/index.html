@@ -8,6 +8,13 @@
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
     />
     <title>+1 Speed Moonwalk Escape</title>
+    <!--
+      The Bloxity SDK. A plain script BEFORE the module bundle, so window.Legion
+      exists when main.ts initialises it. If the CDN is unreachable the game
+      still boots: every SDK call goes through a guard that treats a missing
+      SDK as "no Bloxity".
+    -->
+    <script src="https://sdk.bloxity.io/legion-sdk.min.js"></script>
     <style>
       :root {
         color-scheme: dark;

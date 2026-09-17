@@ -1,6 +1,9 @@
 import {
   MessageType,
   ROOM_NAME,
+  type AvatarLook,
+  type AvatarLookMessage,
+  type BloxityIdentityMessage,
   type BuyUpgradeMessage,
   type ClaimStageMessage,
   type MoveMessage,
@@ -91,10 +94,41 @@ export class NetworkClient {
   private client: Client | null = null;
 
   private room: Room<NetCourseState> | null = null;
+
+  /**
+   * Where the join gets the Bloxity token from. A callback rather than a stored
+   * value, so a logout between two joins can never send the previous token.
+   */
+  private identity: (() => string | null) | null = null;
+  /** The local player's appearance, re-sent on every (re)join. */
+  private look: AvatarLook | null = null;
   private status: ConnectionStatus = 'idle';
 
   constructor(handlers: NetworkHandlers = {}) {
     this.handlers = handlers;
+  }
+
+  /** Where to read the Bloxity token at join time. */
+  setIdentityProvider(provider: () => string | null): void {
+    this.identity = provider;
+  }
+
+  /** Tell the room about a login or logout that happened after joining. */
+  sendIdentity(token: string | null): void {
+    const message: BloxityIdentityMessage = { token: token ?? '' };
+    this.room?.send(MessageType.BloxityIdentity, message);
+  }
+
+  /**
+   * Tell the room what this player's character looks like.
+   *
+   * Remembered, and re-sent on the next join: a look that arrived while the
+   * socket was down would otherwise leave this player as the bundled
+   * character to everybody else until they next touched the customiser.
+   */
+  sendAvatarLook(look: AvatarLook): void {
+    this.look = look;
+    this.room?.send(MessageType.AvatarLook, look satisfies AvatarLookMessage);
   }
 
   get sessionId(): string | null {
@@ -149,7 +183,11 @@ export class NetworkClient {
       try {
         this.room = await this.client.joinOrCreate<NetCourseState>(ROOM_NAME, {
           playerId,
+          // Optional. Verified by the server with Bloxity, never trusted as-is.
+          bloxityToken: this.identity?.() ?? undefined,
         });
+        // Whatever this player looks like, said again on the new socket.
+        if (this.look) this.room.send(MessageType.AvatarLook, this.look satisfies AvatarLookMessage);
         break;
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
@@ -229,7 +267,7 @@ export class NetworkClient {
       const out: NetLeaderEntry[] = [];
       for (let i = 0; i < rows.length; i += 1) {
         const row = rows[i];
-        if (row) out.push({ handle: row.handle, value: row.value });
+        if (row) out.push({ name: row.name, avatar: row.avatar, value: row.value });
       }
       return out;
     };
@@ -262,6 +300,18 @@ export class NetworkClient {
     $(room.state).players.onAdd((player, sessionId) => {
       this.handlers.onPlayerAdded?.(sessionId, player);
       $(player).onChange(() => {
+        this.handlers.onPlayerChanged?.(sessionId, player);
+      });
+      /*
+       * And SEPARATELY on the avatar.
+       *
+       * `onChange` on a schema fires for that schema's OWN fields, not for a
+       * nested one: a player who changed their hat and nothing else produced a
+       * patch the handler above never heard about, so a remote character kept
+       * whatever it was wearing when it joined. The same handler is called,
+       * because the game reads the whole player state either way.
+       */
+      $(player).avatar.onChange(() => {
         this.handlers.onPlayerChanged?.(sessionId, player);
       });
     });

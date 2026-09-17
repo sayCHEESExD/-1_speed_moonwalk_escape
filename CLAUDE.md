@@ -26,12 +26,11 @@ this character moves on the ground, at every speed, for the whole game.
 **Not used, ever:** Unity. Roblox Studio or the Roblox engine. Any other game
 engine. Do not add a framework or a build tool without a concrete need.
 
-**No blockchain, no portal, no cloud integration.** The previous game carried a
-Bloxity SDK bridge, a Bux webhook and an avatar-cosmetics layer. None of it is
-here, deliberately, and none of it should be added back without being asked
-for. The server has exactly one HTTP route (`/health`) for that reason: an
-endpoint that exists before anything needs it is an endpoint nobody is checking
-the authentication on.
+**Bloxity is integrated; nothing else is.** No blockchain and no other cloud
+service. The server has exactly two HTTP routes - `/health` and Bloxity's Bux
+webhook - and must not grow a third without a concrete need: an endpoint that
+exists before anything needs it is an endpoint nobody is checking the
+authentication on.
 
 ## Hard constraints
 
@@ -154,6 +153,81 @@ This is the whole game, so it gets its own section.
   monster's own `isChasing` - never from a guess, a timer or a distance
   heuristic of its own. It is written to only when the answer FLIPS, so a
   per-frame call costs a comparison rather than a DOM write.
+
+## Bloxity
+
+- **One module talks to the SDK: `client/src/bloxity/Bloxity.ts`.** Nothing
+  else touches `window.Legion`. The game hands it plain callbacks through
+  `BloxityHost`; renderer, audio, input and network never import the SDK.
+- Every SDK call goes through `guard()`. The script comes from a third-party CDN
+  and can be blocked or offline, and the game must boot and play without it.
+- **One `auth.onUserChanged` subscription**, inside `Bloxity`, is the auth
+  source of truth. The UI fans out from it via `Bloxity.onUserChanged`. The user
+  object is never cached - always `getUser()`.
+- The slug is `speed-moonwalk-escape`, the same id the deploy workflow publishes
+  to; the workflow bakes it in as `VITE_BLOXITY_GAME_ID` so the two cannot differ.
+- **The server never trusts a Bloxity id from a client.** The client sends its
+  TOKEN on join (and `BloxityIdentity` after a login mid-session); the server
+  resolves it with `GET /v1/social/profile`. A claimed id would let anyone
+  collect another account's paid-for grants.
+- **Bux: SKUs only, never prices.** The catalogue prices a SKU; `SKU_WINS` in
+  `server/src/bloxity/BuxGrants.ts` is the game's half - what it hands over.
+- **The webhook is the ONLY way a purchase becomes Wins.** The client never
+  grants on `requestPurchase` success; it waits for replicated state. The webhook
+  records to a queue that is on disk BEFORE it answers 2xx, dedupes by
+  `transactionId`, answers 2xx for an unknown SKU (a refund would lose a real
+  purchase), and REFUSES everything if `BLOXITY_WEBHOOK_SECRET` is unset unless
+  `BLOXITY_WEBHOOK_ALLOW_UNSIGNED=1` - otherwise it would grant Wins to anyone
+  who found the URL. Grants are applied by the room through `wallet.add`.
+- **A player is shown by their BLOXITY DISPLAY NAME, and by nothing else.**
+  Over their character, on the three boards, in the friends list - one name,
+  the one they chose on bloxity.io, spelled their way. There is no second
+  identity system and there must never be one: this game used to derive a
+  handle (`@SwiftGallop_2F91`) from the browser-stored id, and that is exactly
+  the thing that is gone. The ids it kept - the browser id for persistence, the
+  session id for networking, the Bloxity account id for Bux - all still exist
+  and none of them is ever DRAWN. Someone with no Bloxity identity is
+  `GUEST_NAME`, which is deliberately not unique and deliberately not invented.
+- **The name is the SERVER's answer, never the client's.** `displayName` and
+  `avatarUrl` on `PlayerState` are written only from a profile
+  `verifyBloxityToken` resolved. A name a client could assert is a name it
+  could borrow, and it would be borrowed onto a leaderboard.
+- The boards are keyed by the player ID and shown by the name. Those are two
+  jobs: display names are NOT unique - two people really can both be "Chicken
+  877" - so keying on one would silently merge their totals.
+- **Cosmetics are replicated: everyone is dressed, not just the local player.**
+  A look travels as `AvatarLook` (`shared/src/config/avatar.ts`) - nine slots,
+  seven proportions, and the `bloxity` flag - and `RemotePlayer` owns a
+  `BloxityAvatar` of its own, so the character moonwalking past is wearing what
+  its owner actually chose.
+- **The look is the ONE message whose contents the server replicates rather
+  than decides**, and that is safe for exactly one reason: it is pure
+  presentation with nothing to win by lying about. The server cannot ask
+  Bloxity what somebody else's character wears, so it takes the sender's word,
+  LAUNDERS it (`sanitiseAvatarLook`: ids are about to become CDN URLs on
+  fifteen other machines, proportions are about to become scales) and passes it
+  on. Nothing in a look can reach progression.
+- **THE DEFAULT AVATAR IS BLOXITY'S, not this game's.** A character wears
+  Bloxity's `player.glb` whenever Bloxity could describe its player at all -
+  `AvatarLook.bloxity` - and that is NOT the same question as "is anything
+  equipped". A player who has never opened the customiser still has a Bloxity
+  default avatar: that body, wearing `skins/0.png`. Rendering the bundled
+  `player.fbx` for them would be showing them somebody else. The bundled body
+  is the fallback for one case only - the SDK blocked, offline or absent, or
+  its base model unreachable - which is what `bloxityBodyFactory.build`
+  returning null means.
+- The Bloxity body is applied AFTER the bundled one exists, never before: the
+  character is built from `player.fbx`, then `BloxityAvatar` replaces the model
+  inside it. A look that arrives before the character does waits in
+  `Game.pendingLook`; without that, a fast avatar would dress a character that
+  did not exist yet and the bundled texture would win for the whole session.
+- `player.glb` carries the same twelve bone names, so `PlayerCharacter.setModel`
+  rebinds `PlayerRig` and the moonwalk drives it unchanged. The swap happens
+  INSIDE `visual`, under the `facing` half-turn, so the moonwalk offset is
+  untouched.
+- Hat/back items are sized by the anchor bone's WORLD scale, because the two
+  bodies' bone spaces differ; proportions are applied relative to each bone's
+  rest scale/position, never as rotations (`PlayerRig` owns rotations).
 
 ## Rewards, stages and the finish line
 
@@ -414,13 +488,19 @@ across the upper middle. Speed-gain popups float over the centre.
   cannot leave the game permanently suppressed.
 - **Speed-gain popups** are driven by an ACCUMULATOR over the replicated total,
   never by raw patches, and the pool is a HARD CEILING allocated once.
+- **Names are drawn by `NamePlate`, one per character, local player included.**
+  A sprite on the character's `root` - above the moonwalk half-turn, the death
+  tip-over and the height proportion, so it never mirrors, keels over or grows.
+  It draws `displayName` and nothing when that is empty: a blank plate is the
+  honest answer for a player the server has not verified, and a placeholder
+  there would read as somebody's name.
 - **Every menu must be reachable with a mouse.** Every panel opens from a rail
   tile AND has a key (R, U, M, Escape). A key PRESSES THE BUTTON rather than
   doing the same thing as the button, so the two paths cannot drift.
 
 ## Verification
 
-`npm run verify` runs three suites, and they are the reason the world can be
+`npm run verify` runs four suites, and they are the reason the world can be
 generated with confidence:
 
 - `verify:course` - stages abut with no gaps, every finish line is inside its
@@ -432,6 +512,13 @@ generated with confidence:
   continues for ever, the cap and the requirement are the same moment, the
   upgrade ladder never lets a purchase downgrade anybody, and the level term
   tapers instead of running away.
+- `verify:bloxity` - the Bux webhook: unsigned and wrongly-signed deliveries are
+  refused, a server with no secret refuses, retries pay once, unknown SKUs are
+  2xx with no grant, and the queue survives a restart. Also the two things an
+  identity decides: a look off the wire is clamped and laundered (a traversal
+  or a `javascript:` id never becomes a CDN URL), and a board row shows a
+  Bloxity display name - never an id, never a generated handle - with two
+  players sharing a name still two rows.
 - `verify:services` - the server's own decisions, exercised without a server:
   a stage short of the line pays nothing, crossing pays once, STANDING PAST THE
   LINE DOES NOT PAY TWICE, stages cannot be claimed out of order, a new run

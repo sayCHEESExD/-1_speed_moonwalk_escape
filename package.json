@@ -26,8 +26,9 @@
     "size:client": "node scripts/build-size.mjs",
     "verify:course": "npm run build:shared && node scripts/verify-course.mjs",
     "verify:progression": "npm run build:shared && node scripts/verify-progression.mjs",
-    "verify": "npm run verify:course && npm run verify:progression && npm run verify:services",
-    "verify:services": "npm run build:server && node scripts/verify-services.mjs"
+    "verify": "npm run verify:course && npm run verify:progression && npm run verify:services && npm run verify:bloxity",
+    "verify:services": "npm run build:server && node scripts/verify-services.mjs",
+    "verify:bloxity": "npm run build:server && node scripts/verify-bloxity.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.2.1",

@@ -16,6 +16,17 @@ export interface StoredProfile {
   rebirths: number;
   /** Highest stage ever finished. */
   bestStage: number;
+  /**
+   * The Bloxity display name last seen on this profile, or ''.
+   *
+   * Stored so the boards can name players who are not currently connected. It
+   * is a CACHE of Bloxity's answer, refreshed from the verified profile on
+   * every save - never an identity of this game's own, and never what anything
+   * is keyed by.
+   */
+  displayName: string;
+  /** Their Bloxity profile picture, for the same reason. */
+  avatarUrl: string;
   /** Wall clock of the last save, for diagnostics and future pruning. */
   updatedAt: number;
 }

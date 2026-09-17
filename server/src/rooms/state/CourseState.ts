@@ -4,8 +4,16 @@ import { PlayerState } from './PlayerState.js';
 
 /** One row of one board: who, and how much. */
 export class LeaderEntry extends Schema {
-  /** Derived from the player's id on the server. Empty means an empty row. */
-  @type('string') handle = '';
+  /**
+   * The player's Bloxity display name, `GUEST_NAME` for anyone who has not
+   * signed in, and '' for an empty row.
+   *
+   * Never an id and never derived from one. The board shows who a player is,
+   * and the only authority on that is the Bloxity profile the server verified.
+   */
+  @type('string') name = '';
+  /** Their Bloxity profile picture, so a row reads as a person. '' if unknown. */
+  @type('string') avatar = '';
   @type('float64') value = 0;
 }
 

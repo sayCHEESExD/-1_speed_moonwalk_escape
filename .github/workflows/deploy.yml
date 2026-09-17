@@ -215,6 +215,9 @@ jobs:
 
       - name: Build the client
         env:
+          # The Bloxity slug the SDK initialises with - the same app id this
+          # workflow deploys to, so the two can never name different games.
+          VITE_BLOXITY_GAME_ID: ${{ env.BLOXITY_GAME_ID }}
           # Baked in at build time - Vite has no later step in which to inject
           # them, so a change here means a rebuild.
           #

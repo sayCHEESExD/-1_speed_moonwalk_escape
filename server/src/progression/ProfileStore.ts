@@ -39,6 +39,16 @@ class ProfileStore {
     return this.profiles.entries();
   }
 
+  /** The last Bloxity name seen on this profile, or ''. For the boards. */
+  nameOf(playerId: string): string {
+    return this.profiles.get(playerId)?.displayName ?? '';
+  }
+
+  /** The last Bloxity picture seen on this profile, or ''. */
+  avatarOf(playerId: string): string {
+    return this.profiles.get(playerId)?.avatarUrl ?? '';
+  }
+
   /**
    * Apply a stored profile onto fresh player state.
    *
@@ -71,6 +81,11 @@ class ProfileStore {
       ownedTiers: player.ownedTiers,
       rebirths: player.rebirths,
       bestStage: player.bestStage,
+      // Refreshed from the live state, which the server set from a verified
+      // Bloxity profile. A player who signs out keeps the last name the boards
+      // knew rather than becoming a Guest row with somebody's totals on it.
+      displayName: player.displayName || this.profiles.get(playerId)?.displayName || '',
+      avatarUrl: player.avatarUrl || this.profiles.get(playerId)?.avatarUrl || '',
       updatedAt: Date.now(),
     });
     this.adapter.save(this.profiles);

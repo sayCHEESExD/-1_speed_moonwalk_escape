@@ -1,7 +1,10 @@
 import { MOVEMENT } from '@moonwalk/shared';
 import { DEATH } from '../config/animationConfig.js';
 import { createAnimationInput, type AnimationInput } from '../animation/AnimationInput.js';
+import { BloxityAvatar } from '../bloxity/BloxityAvatar.js';
+import { readAvatarLook } from '../net/readAvatarLook.js';
 import type { NetPlayerState } from '../net/netTypes.js';
+import { NamePlate } from './NamePlate.js';
 import { PlayerCharacter } from './PlayerCharacter.js';
 
 /** Seconds a remote transform is smoothed over. */
@@ -29,6 +32,11 @@ const shortestAngle = (from: number, to: number): number => {
  * collide, so they can never block another player's run. They render
  * completely normally - opaque, no fade, no ghost material.
  *
+ * They are DRESSED and NAMED from replicated state: their Bloxity look and
+ * their verified display name are both on the wire, so the player you see is
+ * wearing what they chose on bloxity.io and is labelled with the name they
+ * chose there. Neither is derived locally and neither is ever an id.
+ *
  * They also have no GUARD. Every player is chased by their own, on their own
  * machine, and nobody is ever shown anyone else's - so a remote is a person
  * moonwalking down the carpet for reasons the viewer cannot see, which is
@@ -36,6 +44,10 @@ const shortestAngle = (from: number, to: number): number => {
  */
 export class RemotePlayer {
   readonly character = new PlayerCharacter();
+
+  /** Their Bloxity cosmetics. The same class that dresses the local player. */
+  private readonly avatar = new BloxityAvatar(this.character);
+  private readonly plate = new NamePlate(this.character.root);
 
   /** Latest authoritative transform, eased toward every frame. */
   private targetX = 0;
@@ -70,6 +82,11 @@ export class RemotePlayer {
 
   /** Copy the replicated fields in. Called on every patch for this player. */
   apply(state: NetPlayerState): void {
+    // Both of these no-op on an unchanged value, which is every patch but the
+    // handful where somebody signs in or changes a hat.
+    this.plate.setName(state.displayName);
+    this.avatar.apply(readAvatarLook(state.avatar));
+
     this.targetX = state.x;
     this.targetY = state.y;
     this.targetZ = state.z;
@@ -139,6 +156,8 @@ export class RemotePlayer {
   }
 
   dispose(): void {
+    this.plate.dispose();
+    this.avatar.dispose();
     this.character.dispose();
   }
 }

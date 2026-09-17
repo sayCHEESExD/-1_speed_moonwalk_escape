@@ -45,7 +45,7 @@ const ease = (t: number): number => t * t * (3 - 2 * t);
  * matrix.
  */
 export class PlayerAnimator {
-  private readonly rig: PlayerRig;
+  private rig: PlayerRig;
   private readonly tipPivot: Group;
   private readonly visual: Group;
 
@@ -87,6 +87,17 @@ export class PlayerAnimator {
   /** The moonwalk's cycle phase, so audio can put a beat on the heel pops. */
   get cyclePhase(): number {
     return this.moonwalk.currentPhase;
+  }
+
+  /**
+   * Drive a different skeleton, e.g. when a Bloxity body replaces the bundled
+   * one. The pose buffers are cleared so the new body does not inherit a
+   * half-blended pose authored for the old one's rest orientation.
+   */
+  setRig(rig: PlayerRig): void {
+    this.rig = rig;
+    this.target.reset();
+    this.output.reset();
   }
 
   /** Clear all animation state, e.g. after a server respawn. */

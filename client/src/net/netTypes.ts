@@ -1,4 +1,4 @@
-import type { PlayerAnimationState, PlayerMotionState } from '@moonwalk/shared';
+import type { AvatarSlot, PlayerAnimationState, PlayerMotionState } from '@moonwalk/shared';
 import type { MapSchema } from '@colyseus/schema';
 
 /**
@@ -10,6 +10,17 @@ import type { MapSchema } from '@colyseus/schema';
  */
 export interface NetPlayerState extends PlayerMotionState {
   sessionId: string;
+  /**
+   * Bloxity display name, verified server-side. '' when unknown.
+   *
+   * THE name this player is shown by - over their character, on the boards,
+   * everywhere. There is no other one.
+   */
+  displayName: string;
+  /** Their Bloxity profile picture, verified server-side. '' when unknown. */
+  avatarUrl: string;
+  /** What their character wears. Replicated, so everyone draws everyone. */
+  avatar: NetAvatarState;
   x: number;
   y: number;
   z: number;
@@ -46,9 +57,31 @@ export interface NetPlayerState extends PlayerMotionState {
   ready: boolean;
 }
 
+/**
+ * A character's appearance, as replicated.
+ *
+ * FLAT, because Colyseus schema fields are: the nine slots and the seven
+ * proportions are their own fields rather than nested objects, and
+ * `readAvatar` in `NetworkClient` is the one place that folds them back into
+ * the `AvatarLook` everything else speaks.
+ */
+export type NetAvatarState = Record<AvatarSlot, string> & {
+  bloxity: boolean;
+  height: number;
+  shoulderWidth: number;
+  armLength: number;
+  legOffsetX: number;
+  torsoScaleX: number;
+  neckHeight: number;
+  headScale: number;
+};
+
 /** One row of one leaderboard, exactly as the server ranked it. */
 export interface NetLeaderEntry {
-  handle: string;
+  /** The player's Bloxity display name, or 'Guest'. Never an id. */
+  name: string;
+  /** Their Bloxity profile picture, or ''. */
+  avatar: string;
   value: number;
 }
 
