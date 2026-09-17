@@ -105,6 +105,12 @@ export class NetworkClient {
   private look: AvatarLook | null = null;
   /** The local player's portal identity, re-sent on every (re)join. */
   private identityMessage: SetIdentityMessage | null = null;
+  /** True while `disconnect()` is deliberately taking the session down. */
+  private leaving = false;
+  /** True while a rejoin is already in flight, so a flapping socket queues one. */
+  private rejoining = false;
+  /** So the "older server" complaint is made once per session, not per join. */
+  private checkedFields = false;
   private status: ConnectionStatus = 'idle';
 
   constructor(handlers: NetworkHandlers = {}) {
@@ -157,6 +163,18 @@ export class NetworkClient {
   }
 
   /**
+   * Whether there is a room to defer to at all.
+   *
+   * The one question the rest of the game has to be able to ask before waiting
+   * on the server for something: a death waiting for a placement that can
+   * never arrive is a frozen player, and this game deliberately keeps running
+   * with no server.
+   */
+  get inRoom(): boolean {
+    return this.room !== null;
+  }
+
+  /**
    * The Colyseus room id, or '' when not in one.
    *
    * A string rather than the room itself: the room object is this class's
@@ -182,6 +200,10 @@ export class NetworkClient {
   }
 
   async connect(): Promise<void> {
+    // Connecting cancels a deliberate departure: a session that is asking for
+    // a room again is not leaving, and leaving it latched would mean the NEXT
+    // dropped socket never tried to come back.
+    this.leaving = false;
     // No endpoint is a CONFIGURATION fault, not a network one, and it is
     // reported as one before a socket is ever attempted. On a static host this
     // is far and away the likeliest thing to be wrong.
@@ -313,7 +335,32 @@ export class NetworkClient {
     this.room?.send(MessageType.RequestRespawn, message);
   }
 
+  /**
+   * Get back into a room after losing one.
+   *
+   * The same backoff the first join uses, and the same join options - so the
+   * player comes back as themselves, wearing what they were wearing, with
+   * their progression restored from the id the browser has always had. A
+   * session that cannot get back stays playable and says so; it does not sit
+   * in a retry loop for ever.
+   */
+  private async rejoin(): Promise<void> {
+    if (this.rejoining || this.leaving) return;
+    this.rejoining = true;
+    try {
+      this.setStatus('reconnecting');
+      await this.connect();
+      logger.info(SCOPE, 'reconnected');
+    } catch {
+      // `connect` has already exhausted its own backoff and reported the
+      // failure; the game keeps running offline.
+    } finally {
+      this.rejoining = false;
+    }
+  }
+
   async disconnect(): Promise<void> {
+    this.leaving = true;
     await this.room?.leave(true);
     this.room = null;
     this.setStatus('disconnected');
@@ -323,6 +370,7 @@ export class NetworkClient {
     const $ = getStateCallbacks(room);
 
     $(room.state).players.onAdd((player, sessionId) => {
+      if (sessionId === room.sessionId) this.checkServerFields(player);
       this.handlers.onPlayerAdded?.(sessionId, player);
       $(player).onChange(() => {
         this.handlers.onPlayerChanged?.(sessionId, player);
@@ -360,8 +408,39 @@ export class NetworkClient {
 
     room.onLeave((code) => {
       logger.warn(SCOPE, `left room (code ${code})`);
+      this.room = null;
       this.setStatus('disconnected', `code ${code}`);
+      // A server that went away may come back - a restart, a redeploy, a
+      // dropped connection. Everything the room needs to know about this
+      // player travels with the join (the stored id, the portal identity and
+      // the look), so a rejoin restores the session rather than half of it.
+      if (!this.leaving) void this.rejoin();
     });
+  }
+
+  /**
+   * Complain, ONCE and loudly, if the room cannot carry what this client sends.
+   *
+   * The same failure the scoreboard learned to report: a deployed server older
+   * than the deployed client has no `displayName` and no `avatar` on its
+   * player state, so every name silently falls back to Guest and every
+   * character to the bundled one - with the game otherwise working perfectly,
+   * which is what makes it so hard to place. It is a deployment fault and the
+   * operator is the only one who can fix it, so it says exactly that.
+   */
+  private checkServerFields(player: NetPlayerState): void {
+    if (this.checkedFields) return;
+    this.checkedFields = true;
+    const missing: string[] = [];
+    if (!('displayName' in player)) missing.push('displayName');
+    if (!('avatar' in player)) missing.push('avatar');
+    if (missing.length === 0) return;
+    logger.error(
+      SCOPE,
+      `the game server is running an OLDER build than this client: its player ` +
+        `state has no ${missing.join(' or ')}. Every player will show as a ` +
+        `guest wearing the bundled character until the server is redeployed.`,
+    );
   }
 
   private setStatus(status: ConnectionStatus, detail?: string): void {

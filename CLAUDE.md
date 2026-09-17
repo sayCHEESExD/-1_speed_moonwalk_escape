@@ -213,6 +213,15 @@ This is the whole game, so it gets its own section.
   its owner actually chose. ONE construction path for local and remote alike:
   two would be how a player ends up looking different on their own screen to
   how they look on everybody else's.
+- **A missing asset falls back for that ONE thing.** A part the catalogue
+  does not know leaves that slot's default mesh; a hat with a mesh and no
+  texture (three of the catalogue's 243 hats) is worn plain rather than not at
+  all; a body that cannot be fetched leaves the bundled character. Nothing
+  about one missing item may replace a whole avatar.
+- Body PARTS carry no texture of their own - checked across all 600 catalogue
+  items - because the skin is ONE atlas covering the whole body. One material
+  per body is therefore right, and a per-part material would be a second answer
+  to a question that has one.
 - **NOTHING builds an asset URL out of an id.** `describeItem` reads the item's
   own `assetPaths` from Bloxity's public catalogue and they are used verbatim;
   an item the catalogue does not know is simply not worn, and only that slot
@@ -302,6 +311,20 @@ This is the whole game, so it gets its own section.
   no position for exactly that reason: a placement that could land somewhere
   else is a checkpoint system waiting to be reintroduced. Only a finish line
   moves anybody forward, and it does it by not teleporting them at all.
+- **A death with NO SERVER is placed by the client** (`Game.placeOffline`), at
+  the same `SPAWN_POSITION` the server would have used. "The server decides"
+  has no answer when there is no server, and this game deliberately keeps
+  rendering and moving with none - so without this the first death ENDED the
+  session: the fall-over finished, the placement request went into a closed
+  socket, and the player sat where they died for ever. That is a real state -
+  a crashed server, a dead deployment, another game holding this one's port -
+  and it is exactly what it looked like. Nothing is granted offline, so there
+  is nothing there to cheat.
+- **A dropped room is rejoined** (`NetworkClient.rejoin`), with the same
+  backoff and the same join options the first join used - the stored player id,
+  the portal identity and the look all travel with it, so a restarted server
+  restores the whole session rather than half of it. A deliberate
+  `disconnect()` does not come back.
 
 ## Progression
 

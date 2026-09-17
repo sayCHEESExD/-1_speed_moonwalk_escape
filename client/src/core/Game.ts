@@ -1,5 +1,7 @@
 import {
   GUEST_NAME,
+  SPAWN_POSITION,
+  SPAWN_ROTATION_Y,
   stageAt,
   type AvatarLook,
   type RespawnMessage,
@@ -129,6 +131,9 @@ export class Game {
   /** Cosmetics on the local character. Built once the model exists. */
   private bloxityAvatar: BloxityAvatar | null = null;
   /** The latest look, held until the character is built. */
+  /** So an offline session says why it placed a death itself once, not per death. */
+  private warnedOfflineRespawn = false;
+
   /** A look that arrived before there was a character to put it on. */
   private pendingLook: AvatarLook | null = null;
 
@@ -517,8 +522,12 @@ export class Game {
       // death, so ASK for a placement rather than sit frozen waiting for one
       // that was never coming.
       if (player.consumeRespawnNudge()) {
-        logger.warn(SCOPE, 'death was not acknowledged; requesting a respawn');
-        this.network.requestRespawn('manual');
+        if (this.network.inRoom) {
+          logger.warn(SCOPE, 'death was not acknowledged; requesting a respawn');
+          this.network.requestRespawn('manual');
+        } else {
+          this.placeOffline(player);
+        }
       }
 
       this.snapCameraIfPlaced();
@@ -630,6 +639,37 @@ export class Game {
     // A new run gets a new guard placement and a fresh grace window. Without
     // this the guard would still be standing wherever it caught them, half a
     // course away, and the next run would be unchased until it wandered back.
+    this.guard.placeBehind(player.position, player.rotationY);
+  }
+
+  /**
+   * Place a dead player at the arena when there is NO server to ask.
+   *
+   * The server owns placement, and that does not change - but "the server
+   * decides" has no answer when there is no server, and this game deliberately
+   * keeps rendering and moving with none (a failed join says so and plays on).
+   * Without this the first death is the end of the session: the fall-over
+   * finishes, the request for a placement goes into a closed socket, and the
+   * player sits at the spot they died on for ever. That is a real state -
+   * a crashed server, a dead deployment, another game holding this one's port -
+   * and it is exactly what it looked like.
+   *
+   * There is nothing to cheat here and nothing to gain: an offline session
+   * awards no Speed, no Wins and no stages, because all of those are the
+   * server's. This places the character, and only the character, at the SAME
+   * spawn constant the server would have used.
+   */
+  private placeOffline(player: LocalPlayer): void {
+    if (!this.warnedOfflineRespawn) {
+      this.warnedOfflineRespawn = true;
+      logger.warn(
+        SCOPE,
+        'not connected to a game server, so this death was placed locally. ' +
+          'Progression is server-owned and will not advance until the session ' +
+          'reconnects.',
+      );
+    }
+    player.teleport(SPAWN_POSITION.x, SPAWN_POSITION.y, SPAWN_POSITION.z, SPAWN_ROTATION_Y);
     this.guard.placeBehind(player.position, player.rotationY);
   }
 

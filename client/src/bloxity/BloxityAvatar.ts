@@ -315,25 +315,40 @@ export class BloxityAvatar {
     const item = await describeItem(wanted);
     const meshPath = item?.assetPaths?.mesh;
     const texturePath = item?.assetPaths?.texture;
-    if (!meshPath || !texturePath) {
+    if (!meshPath) {
       logger.warn(SCOPE, `${slot} ${wanted} has no mesh in the catalogue - not worn`);
       return;
     }
 
     try {
+      /*
+       * The TEXTURE is optional, the mesh is not.
+       *
+       * Three of the catalogue's two hundred and forty-three hats ship a mesh
+       * and no texture, and refusing those - which is what this did - silently
+       * left those players bare-headed while their portal showed them wearing
+       * something. A missing texture is a missing texture: the mesh is worn
+       * plain, and only that one thing falls back.
+       */
       const [object, texture] = await Promise.all([
         this.objLoader.loadAsync(assetUrl(meshPath)),
-        this.textureLoader.loadAsync(assetUrl(texturePath)),
+        texturePath ? this.textureLoader.loadAsync(assetUrl(texturePath)) : Promise.resolve(null),
       ]);
       const still = slot === 'hat' ? this.currentHat : this.currentBack;
       // `anchor.parent` is null once a body swap has taken this skeleton away.
       if (this.disposed || still !== wanted || !anchor.parent || !this.bones.has(anchor.name)) {
-        texture.dispose();
+        texture?.dispose();
         return;
       }
-      pixelArt(texture);
-      this.textures.push(texture);
-      const material = new MeshStandardMaterial({ map: texture, roughness: 0.85 });
+      if (texture) {
+        pixelArt(texture);
+        this.textures.push(texture);
+      }
+      const material = new MeshStandardMaterial({
+        map: texture,
+        color: texture ? 0xffffff : 0xb9c2cf,
+        roughness: 0.85,
+      });
       object.traverse((child) => {
         if (child instanceof Mesh) {
           child.material = material;
