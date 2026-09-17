@@ -3,10 +3,13 @@ import {
   MAX_PLAYERS_PER_ROOM,
   MessageType,
   PlayerAnimationState,
+  sanitiseDisplayName,
+  sanitisePfpUrl,
   SPAWN_POSITION,
   SPAWN_ROTATION_Y,
   type AvatarLookMessage,
   type BloxityIdentityMessage,
+  type SetIdentityMessage,
   type BuyUpgradeMessage,
   type ClaimStageMessage,
   type MoveMessage,
@@ -38,8 +41,10 @@ const AUTOSAVE_SECONDS = 15;
 /** Options a client may pass on join. Identity only. */
 interface JoinOptions {
   playerId?: string;
-  /** A Bloxity token, verified with Bloxity. Never an id. */
+  /** A Bloxity token, verified with Bloxity. Never an id. Used for Bux only. */
   bloxityToken?: string;
+  /** Display name and portrait, as the portal reports them. */
+  identity?: SetIdentityMessage;
 }
 
 /**
@@ -130,6 +135,17 @@ export class CourseRoom extends Room<CourseState> {
     this.onMessage(MessageType.AvatarLook, (client, message: AvatarLookMessage) => {
       this.state.players.get(client.sessionId)?.avatar.apply(message);
     });
+    /*
+     * Who the portal says this player is.
+     *
+     * Taken from the client for the same reason a look is: there is no
+     * server-to-server route that answers "who owns this socket", and a name
+     * buys a label on a sign and never a Win. Requiring a server-verified name
+     * is what used to leave every signed-in player showing as a guest.
+     */
+    this.onMessage(MessageType.SetIdentity, (client, message: SetIdentityMessage) =>
+      this.writeIdentity(client.sessionId, message),
+    );
 
     this.setSimulationInterval(
       (deltaMs) => this.tick(deltaMs / 1000),
@@ -188,6 +204,11 @@ export class CourseRoom extends Room<CourseState> {
     // `initialise` reset the level to 1 for a fresh profile; a restored one
     // has to be re-derived from the Speed it came back with.
     if (restored) this.speeds.syncDerived(player);
+
+    // Who the portal says they are, if the client knew before it joined.
+    // Without this a returning player is nameless until their next portal
+    // event, which for somebody who logged in before loading is never.
+    this.writeIdentity(client.sessionId, options.identity);
 
     // In the background: a join must not wait on a round trip to Bloxity.
     if (typeof options.bloxityToken === 'string' && options.bloxityToken) {
@@ -376,6 +397,25 @@ export class CourseRoom extends Room<CourseState> {
   }
 
   /**
+   * Sanitise a name and portrait, and show them to the whole room.
+   *
+   * The ONE path either field is set by. Assigned only on a real change: an
+   * identical write still counts as a change to the schema encoder, and an
+   * identity is re-sent whenever the portal so much as re-reports it.
+   */
+  private writeIdentity(sessionId: string, message: Partial<SetIdentityMessage> | undefined): void {
+    const player = this.state.players.get(sessionId);
+    if (!player) return;
+    const name = sanitiseDisplayName(message?.name);
+    const pfp = sanitisePfpUrl(message?.pfp);
+    if (player.displayName !== name) player.displayName = name;
+    if (player.avatarUrl !== pfp) player.avatarUrl = pfp;
+    // Persist it, so the boards can still name this player after they leave.
+    const playerId = this.playerIds.get(sessionId);
+    if (playerId && name) profileStore.save(playerId, player);
+  }
+
+  /**
    * Resolve a Bloxity token to an account, then hand over anything it bought.
    *
    * An empty token is a logout. Every call supersedes the one before it, so a
@@ -386,12 +426,10 @@ export class CourseRoom extends Room<CourseState> {
     this.identityChecks.set(sessionId, check);
 
     if (!token) {
+      // A logout. The NAME is not touched here - it arrives by `SetIdentity`
+      // from the same portal event, and this path exists only to stop a
+      // purchase being granted to an account that has signed out.
       this.bloxityIds.delete(sessionId);
-      const player = this.state.players.get(sessionId);
-      if (player) {
-        player.displayName = '';
-        player.avatarUrl = '';
-      }
       return;
     }
 
@@ -401,17 +439,10 @@ export class CourseRoom extends Room<CourseState> {
       if (!player) return;
       if (!user) {
         this.bloxityIds.delete(sessionId);
-        player.displayName = '';
-        player.avatarUrl = '';
         return;
       }
       this.bloxityIds.set(sessionId, user.id);
-      // The name every other client shows above this character and on the
-      // boards. It is set HERE, from a profile Bloxity resolved, and nowhere
-      // else - a name a client could assert would be a name it could borrow.
-      player.displayName = user.displayName || user.username;
-      player.avatarUrl = user.avatarUrl;
-      logger.info(SCOPE, `${sessionId} verified as Bloxity @${user.username}`);
+      logger.info(SCOPE, `${sessionId} verified as Bloxity @${user.username} (for Bux)`);
       this.applyGrants(sessionId, player);
     });
   }

@@ -16,6 +16,14 @@ export interface LegionUser {
   readonly email?: string;
   readonly pfp?: string;
   readonly avatar?: string;
+  /**
+   * A local guest rather than an account.
+   *
+   * The SDK hands guests a random nickname that changes when the browser is
+   * cleared, so a guest is treated as signed out for the NAME - see
+   * `identity.ts`. Their portrait is still theirs.
+   */
+  readonly isGuest?: boolean;
 }
 
 /**

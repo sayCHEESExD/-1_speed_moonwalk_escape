@@ -7,25 +7,16 @@ export interface VerifiedBloxityUser {
   readonly id: string;
   readonly username: string;
   readonly displayName: string;
-  /** Their profile picture, or '' - an absolute https URL and nothing else. */
-  readonly avatarUrl: string;
 }
 
 /**
- * A picture URL fit to replicate.
- *
- * It is about to be an `<img src>` on fifteen other machines and a texture on
- * a board in the world, so only an absolute https URL is taken. Anything else -
- * a relative path, a `data:` blob, a `javascript:` string - is dropped and the
- * row simply shows no picture.
- */
-const pictureUrl = (value: unknown): string => {
-  if (typeof value !== 'string' || value.length > 300) return '';
-  return value.startsWith('https://') ? value : '';
-};
-
-/**
  * Resolve a Bloxity token to the account it belongs to.
+ *
+ * FOR BUX, and for nothing else. What a player is CALLED arrives separately,
+ * as an identity the client reports and the server sanitises - see
+ * `shared/src/types/identity.ts` for why that split is the right one. This
+ * answers the only question worth a round trip: which account a purchase
+ * belongs to.
  *
  * The client sends its TOKEN, never its id. A claimed id would let anybody say
  * they were somebody else and collect that person's paid-for Bux grants; a
@@ -62,10 +53,7 @@ export const verifyBloxityToken = async (
     }
     const name = typeof username === 'string' ? username : '';
     const display = typeof candidate['displayName'] === 'string' ? candidate['displayName'] : name;
-    // `pfp` is what the SDK's own user object calls it; `avatar` is what the
-    // reference page reads. Either is the same picture.
-    const avatarUrl = pictureUrl(candidate['pfp'] ?? candidate['avatar'] ?? candidate['avatarUrl']);
-    return { id, username: name, displayName: (display as string).slice(0, 40), avatarUrl };
+    return { id, username: name, displayName: (display as string).slice(0, 40) };
   } catch (error) {
     logger.warn(SCOPE, `could not verify token: ${String(error)}`);
     return null;

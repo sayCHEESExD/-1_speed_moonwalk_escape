@@ -21,6 +21,11 @@ export class RemotePlayerManager {
     return this.players.size;
   }
 
+  /** Every remote player, for the one pass that draws their nameplates. */
+  entries(): IterableIterator<[string, RemotePlayer]> {
+    return this.players.entries();
+  }
+
   add(sessionId: string, state: NetPlayerState): void {
     if (this.players.has(sessionId)) return;
     const player = new RemotePlayer(state);

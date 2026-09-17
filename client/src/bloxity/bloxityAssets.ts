@@ -1,29 +1,55 @@
+import { logger } from '../util/logger.js';
+
+const SCOPE = 'bloxity/assets';
+
 /**
  * Where Bloxity's avatar assets live.
  *
- * These are the URL patterns from the SDK spec and from the canonical reference
- * page (`https://bloxity.io/test-game.html`, its `getItemUrls`), and the base
- * body and default skin were confirmed to serve from the live CDN before being
- * written here. Callers must only ask for a slot whose id passes
- * `isEquippedId` - an unequipped slot has no asset, and building a URL out of
- * `'-1'` is a guaranteed 404.
+ * NOT invented, and not guessed from a naming pattern: both hosts are the ones
+ * the SDK this game already loads uses itself - it resolves every asset
+ * through `https://static.bloxity.io${path}` and fetches its catalogue from
+ * `https://api.bloxity.io`.
+ *
+ * The important consequence, and the whole reason this file was rewritten:
+ * NOTHING here builds an asset URL out of an id. The catalogue hands back an
+ * `assetPaths` object per item and those paths are used verbatim. The id-based
+ * patterns that used to live here were right for most items and silently wrong
+ * for the rest - a 404 for a part is an avatar missing an arm, and a 404 for a
+ * texture is a black head - which is exactly what players were seeing.
  */
-export const AVATAR_CDN = 'https://static.bloxity.io/avatars';
+const STATIC_BASE = 'https://static.bloxity.io';
+const API_BASE = 'https://api.bloxity.io';
 
-/** The base body. Its skeleton carries the same twelve bone names `PlayerRig` binds. */
-export const PLAYER_GLB_URL = `${AVATAR_CDN}/player.glb`;
+/**
+ * The base body.
+ *
+ * The one path that IS a constant, because it is not an item and has no
+ * catalogue entry - the SDK loads it by this literal too. Its skeleton carries
+ * the same twelve bone names `PlayerRig` binds, which is what lets the
+ * moonwalk drive a Bloxity body without knowing it is one.
+ */
+export const PLAYER_GLB_URL = `${STATIC_BASE}/avatars/player.glb`;
 
-/** The skin Bloxity's own renderer falls back to when none is equipped. */
-export const DEFAULT_SKIN_ID = '0';
+/**
+ * The skin worn when a Bloxity player has none equipped.
+ *
+ * The SDK's own fallback: it maps a missing or `'-1'` skin id to `0` and loads
+ * `/avatars/skins/0.png`. A Bloxity body with no texture renders white.
+ */
+export const DEFAULT_SKIN_URL = `${STATIC_BASE}/avatars/skins/0.png`;
+
+/** Resolve a catalogue-supplied path against the asset host. */
+export const assetUrl = (path: string): string =>
+  path.startsWith('http') ? path : `${STATIC_BASE}${path}`;
 
 /**
  * The portrait shown when a player has no picture of their own.
  *
- * DRAWN HERE, not fetched. The reference page falls back to
- * `static.bloxity.io/img/pfps/0.png`, and that URL answers 404 - so using it
- * would put a broken-image icon next to somebody's name, which is worse than
- * having no picture at all. A neutral disc says "no picture" without
- * pretending to be one, and costs no request.
+ * DRAWN HERE, not fetched. Bloxity's own placeholder
+ * (`static.bloxity.io/img/pfps/0.png`, which its reference page still uses)
+ * answers 404, so pointing at it would put a broken-image icon beside
+ * somebody's name. A neutral disc says "no picture" without pretending to be
+ * one, and costs no request.
  */
 export const DEFAULT_PFP_URL =
   'data:image/svg+xml;utf8,' +
@@ -35,115 +61,129 @@ export const DEFAULT_PFP_URL =
       '</svg>',
   );
 
-export const hatUrls = (id: string): { mesh: string; texture: string } => ({
-  mesh: `${AVATAR_CDN}/items/hats/${id}.obj`,
-  texture: `${AVATAR_CDN}/textures/hats/${id}.png`,
-});
-
-export const backUrls = (id: string): { mesh: string; texture: string } => ({
-  mesh: `${AVATAR_CDN}/items/back/${id}.obj`,
-  texture: `${AVATAR_CDN}/textures/back/${id}.png`,
-});
-
-export const skinUrl = (id: string): string => `${AVATAR_CDN}/skins/${id}.png`;
-
-export const iconUrl = (id: string): string => `${AVATAR_CDN}/icons/${id}.png`;
-
-/** Head and torso are single meshes. */
-export const partUrl = (type: 'head' | 'torso', id: string): string =>
-  `${AVATAR_CDN}/parts/${type}/${id}.glb`;
-
-/** Arms and legs are authored as a left and a right under one id. */
-export const pairedPartUrl = (type: 'arms' | 'legs', id: string, side: 'L' | 'R'): string =>
-  `${AVATAR_CDN}/parts/${type}/${id}_${side}.glb`;
-
-/**
- * The catalogue's own asset paths for an item, or null.
- *
- * WHY THIS EXISTS: the id-based patterns above are right for 498 of the 500
- * items in Bloxity's public catalogue, checked item by item - but not all of
- * them. The Default Skin's file is `skins/0.png`, and at least one back item
- * ("Flamingo") keeps its texture under a different filename entirely. So the
- * catalogue's `assetPaths` are used when they can be had, and the spec pattern
- * is the FALLBACK rather than the only answer.
- *
- * `GET /v1/avatar/items/{id}` is public (appearance is public data). The
- * promise is cached per id, including a failed lookup, so two slots wearing
- * the same item cost one request and a missing item is not retried in a loop.
- */
-interface ItemPaths {
-  readonly mesh?: string;
-  readonly meshL?: string;
-  readonly meshR?: string;
-  readonly texture?: string;
+/** The catalogue's own item shape, narrowed to what a renderer needs. */
+export interface BloxityItem {
+  readonly id: string;
+  readonly type?: 'skin' | 'hat' | 'back' | 'part';
+  /** Present on `part` items only. */
+  readonly partSlot?: 'head' | 'torso' | 'arms' | 'legs';
+  /**
+   * On a HAT: the head this hat insists on being worn with.
+   *
+   * Not a hiding flag, which is the natural but wrong reading of the name.
+   * Bloxity's customiser applies it as `equipped.headId = item.forceHeadId`,
+   * and its renderer treats a head of `'-1'` as "put the DEFAULT head back" -
+   * so a helmet modelled around the stock head declares `'-1'`, and a custom
+   * head worn under it pokes straight through the helmet.
+   */
+  readonly forceHeadId?: string | null;
+  readonly assetPaths?: {
+    /** Single mesh: a hat, a back item, a head or a torso. */
+    readonly mesh?: string;
+    /** Paired meshes: arms and legs are authored as a left and a right. */
+    readonly meshL?: string;
+    readonly meshR?: string;
+    readonly texture?: string;
+    readonly icon?: string;
+  };
 }
 
-const CATALOGUE_API = 'https://api.bloxity.io/v1/avatar/items';
-const STATIC_HOST = 'https://static.bloxity.io';
-const catalogue = new Map<string, Promise<ItemPaths | null>>();
+/**
+ * The item cache.
+ *
+ * Keyed by id and holding the PROMISE rather than the result, which is what
+ * makes two players wearing the same hat share one request instead of racing
+ * to make two. A failed lookup is cached as `null` deliberately: an id the
+ * catalogue does not know will not start knowing it because another player
+ * wore it, and retrying per player per join is how a missing item becomes a
+ * request storm.
+ */
+const items = new Map<string, Promise<BloxityItem | null>>();
 
-const catalogPaths = (id: string): Promise<ItemPaths | null> => {
-  const cached = catalogue.get(id);
+/**
+ * The same items once they have actually resolved.
+ *
+ * A synchronous window onto the cache, for the one caller that has to decide
+ * something DURING a frame rather than a tick later: the avatar needs to know
+ * whether a hat forces a head before it picks a body, and awaiting there would
+ * make a re-dress asynchronous for every player who is not wearing one.
+ */
+const resolved = new Map<string, BloxityItem | null>();
+
+/**
+ * What the catalogue already knows about an item, without waiting.
+ *
+ * `undefined` means "not asked yet", which is deliberately distinct from the
+ * `null` that means "asked, and there is no such item" - only the first of
+ * those is worth scheduling a second look for.
+ */
+export const peekItem = (id: string): BloxityItem | null | undefined =>
+  id ? resolved.get(id) : null;
+
+/**
+ * Look one item up in Bloxity's public catalogue.
+ *
+ * `GET /v1/avatar/items/{id}` - the per-item route, so a player wearing three
+ * things costs three small requests rather than a walk through a catalogue of
+ * hundreds. No authentication: appearance is public data, which is the whole
+ * reason a REMOTE player's look can be resolved from an id at all.
+ */
+export const describeItem = (id: string): Promise<BloxityItem | null> => {
+  if (!id) return Promise.resolve(null);
+
+  const cached = items.get(id);
   if (cached) return cached;
-  const request = fetch(`${CATALOGUE_API}/${encodeURIComponent(id)}`, {
-    signal: AbortSignal.timeout(6000),
+
+  const request = fetch(`${API_BASE}/v1/avatar/items/${encodeURIComponent(id)}`, {
+    signal: AbortSignal.timeout(8000),
   })
     .then(async (response) => {
-      if (!response.ok) return null;
-      const body = (await response.json()) as {
-        assetPaths?: ItemPaths;
-        item?: { assetPaths?: ItemPaths };
-      };
-      return body.assetPaths ?? body.item?.assetPaths ?? null;
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const body = (await response.json()) as BloxityItem & { item?: BloxityItem };
+      const item = body.item ?? body;
+      resolved.set(id, item);
+      return item;
     })
-    .catch(() => null);
-  catalogue.set(id, request);
+    .catch((error: unknown) => {
+      logger.warn(SCOPE, `item ${id} could not be resolved: ${String(error)}`);
+      resolved.set(id, null);
+      return null;
+    });
+
+  items.set(id, request);
   return request;
 };
 
-const fromCdn = (path: string): string => (path.startsWith('http') ? path : `${STATIC_HOST}${path}`);
-
-/** Mesh and texture for a hat or back item: catalogue first, spec pattern as fallback. */
-export const resolveItemUrls = async (
-  slot: 'hat' | 'back',
-  id: string,
-): Promise<{ mesh: string; texture: string }> => {
-  const fallback = slot === 'hat' ? hatUrls(id) : backUrls(id);
-  const paths = await catalogPaths(id);
-  return {
-    mesh: paths?.mesh ? fromCdn(paths.mesh) : fallback.mesh,
-    texture: paths?.texture ? fromCdn(paths.texture) : fallback.texture,
-  };
-};
-
-/** A skin's texture: catalogue first, spec pattern as fallback. The default needs no lookup. */
-export const resolveSkinUrl = async (id: string): Promise<string> => {
-  if (id === DEFAULT_SKIN_ID) return skinUrl(id);
-  const paths = await catalogPaths(id);
-  return paths?.texture ? fromCdn(paths.texture) : skinUrl(id);
-};
-
 /**
- * The mesh in `player.glb` each part replaces.
+ * Which mesh in `player.glb` a part replaces, and which path supplies it.
  *
- * Names taken from the reference page's `PART_MESH_NAMES`.
+ * The mesh names are the SDK's own. Arms and legs are PAIRS - ONE catalogue
+ * item carrying `meshL` and `meshR` - which is why this maps to a list rather
+ * than to a single name, and why a left and a right arm are not two lookups.
  */
-export const PART_MESH_NAMES = {
-  head: 'default_head',
-  torso: 'default_torso',
-  arm_L: 'default_arm_L',
-  arm_R: 'default_arm_R',
-  leg_L: 'default_leg_L',
-  leg_R: 'default_leg_R',
-} as const;
+export const PART_TARGETS: Readonly<
+  Record<
+    NonNullable<BloxityItem['partSlot']>,
+    ReadonlyArray<{ mesh: string; path: 'mesh' | 'meshL' | 'meshR' }>
+  >
+> = {
+  head: [{ mesh: 'default_head', path: 'mesh' }],
+  torso: [{ mesh: 'default_torso', path: 'mesh' }],
+  arms: [
+    { mesh: 'default_arm_L', path: 'meshL' },
+    { mesh: 'default_arm_R', path: 'meshR' },
+  ],
+  legs: [
+    { mesh: 'default_leg_L', path: 'meshL' },
+    { mesh: 'default_leg_R', path: 'meshR' },
+  ],
+};
 
 /**
  * How tall `player.glb` stands in its own units.
  *
- * This game's character is `PLAYER_HEIGHT` (3.2) world units, so the Bloxity
- * body is scaled by 3.2 / 6.4 to be interchangeable with `player.fbx`. It is
- * also the reference scale for hats and back items: the reference page parents
- * a hat at (0, 0.8, 0) on the head bone of an unscaled `player.glb`, and those
- * numbers are converted through this ratio rather than retuned per body.
+ * The GLB's bind pose measures 6.4 units head to foot; this game's character
+ * is `PLAYER_HEIGHT` (3.2) world units. Halving the Bloxity body is what makes
+ * the two interchangeable.
  */
 export const BLOXITY_MODEL_HEIGHT = 6.4;

@@ -1,4 +1,4 @@
-import { PLAYER_HEIGHT, isEquippedId, type AvatarItems } from '@moonwalk/shared';
+import { PLAYER_HEIGHT, type AvatarItems } from '@moonwalk/shared';
 import {
   Mesh,
   MeshStandardMaterial,
@@ -12,10 +12,11 @@ import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.j
 import { logger } from '../util/logger.js';
 import {
   BLOXITY_MODEL_HEIGHT,
-  PART_MESH_NAMES,
+  PART_TARGETS,
   PLAYER_GLB_URL,
-  pairedPartUrl,
-  partUrl,
+  assetUrl,
+  describeItem,
+  type BloxityItem,
 } from './bloxityAssets.js';
 
 const SCOPE = 'bloxity/body';
@@ -23,24 +24,29 @@ const SCOPE = 'bloxity/body';
 /**
  * Builds a character body out of a player's Bloxity avatar.
  *
- * Used for EVERY player in the room, not just the local one: a look is
- * replicated, so a remote character is dressed by this same factory from the
- * same caches. Fifteen players wearing the default body cost one download.
- *
  * The body is Bloxity's `player.glb`, and body PARTS are geometry swapped onto
- * its skeleton by mesh name - which is how the reference page's viewer does it,
- * and the only way it can be done, because a part is a skinned mesh authored
+ * its skeleton by mesh name - which is how Bloxity's own renderer does it, and
+ * the only way it can be done, because a part is a skinned mesh authored
  * against that one shared rig.
  *
  * What makes this safe here is that the GLB's rig carries the same twelve bone
  * names `PlayerRig` binds, so the moonwalk and the jump drive a Bloxity body
  * without knowing it is one. Nothing in this file animates.
  *
- * Everything is cached by URL, so rebuilding for a hat-and-skin change costs
- * no network at all.
+ * Used for EVERY player, local and remote, so there is ONE construction path
+ * and nobody can look different on their own screen to how they look on
+ * everybody else's. Everything is cached by URL, so fifteen players in the
+ * same body cost one download.
  */
 export class BloxityBodyFactory {
   private prototype: Promise<Object3D | null> | null = null;
+
+  /**
+   * Remapped part geometry, by asset URL.
+   *
+   * Shareable between bodies because the remap targets the PROTOTYPE's bone
+   * order and every body is a clone of that one prototype.
+   */
   private readonly parts = new Map<string, Promise<BufferGeometry | null>>();
 
   private loadPrototype(): Promise<Object3D | null> {
@@ -48,7 +54,14 @@ export class BloxityBodyFactory {
       .loadAsync(PLAYER_GLB_URL)
       .then((gltf) => {
         const root = gltf.scene;
-        // Remembered so proportions can scale RELATIVE to it later.
+        /*
+         * Sized to this game's character, ONCE and uniformly.
+         *
+         * The GLB stands 6.4 units tall and a player here is 3.2. This is the
+         * only place the body's own scale is set; the height proportion is a
+         * multiplier applied on top of `baseScale` by `BloxityAvatar`, which
+         * is what stops the two becoming a double scaling.
+         */
         const scale = PLAYER_HEIGHT / BLOXITY_MODEL_HEIGHT;
         root.scale.setScalar(scale);
         root.userData['baseScale'] = scale;
@@ -67,6 +80,9 @@ export class BloxityBodyFactory {
    *
    * Null is the fallback path, not an error: the caller keeps the bundled
    * `player.fbx`, which is what should happen when Bloxity is blocked or down.
+   * A part that is missing from the catalogue falls back ON ITS OWN - the
+   * default mesh for that slot stays - so one bad id costs an arm, never a
+   * whole avatar.
    */
   async build(items: AvatarItems): Promise<Object3D | null> {
     const prototype = await this.loadPrototype();
@@ -77,8 +93,8 @@ export class BloxityBodyFactory {
     // Marks a body whose material is its OWN and may be disposed on a swap.
     body.userData['bloxityBody'] = true;
 
-    // One material for the whole body: the skin is a single atlas covering
-    // every part. `BloxityAvatar` owns its map.
+    // One material for the whole body, as Bloxity's renderer uses: the skin is
+    // a single atlas covering every part. `BloxityAvatar` owns its map.
     const material = new MeshStandardMaterial({ metalness: 0, roughness: 1 });
     const skinned: SkinnedMesh[] = [];
     body.traverse((child) => {
@@ -97,37 +113,46 @@ export class BloxityBodyFactory {
     return body;
   }
 
+  /**
+   * Swap in every equipped body part, in parallel.
+   *
+   * Arms and legs are ONE catalogue item carrying two meshes, which is the
+   * thing the id-pattern version of this file got wrong: it asked for
+   * `{id}_L.glb` and `{id}_R.glb` per side and got 404s for every item whose
+   * files are not named that way. One id, one lookup, both meshes.
+   */
   private async wearParts(items: AvatarItems, skinned: readonly SkinnedMesh[]): Promise<void> {
-    const jobs: { url: string; mesh: string }[] = [];
-    if (isEquippedId(items.head)) {
-      jobs.push({ url: partUrl('head', items.head), mesh: PART_MESH_NAMES.head });
-    }
-    if (isEquippedId(items.torso)) {
-      jobs.push({ url: partUrl('torso', items.torso), mesh: PART_MESH_NAMES.torso });
-    }
-    // Each limb slot has its own id, and each is loaded from its own side's file.
-    if (isEquippedId(items.armL)) {
-      jobs.push({ url: pairedPartUrl('arms', items.armL, 'L'), mesh: PART_MESH_NAMES.arm_L });
-    }
-    if (isEquippedId(items.armR)) {
-      jobs.push({ url: pairedPartUrl('arms', items.armR, 'R'), mesh: PART_MESH_NAMES.arm_R });
-    }
-    if (isEquippedId(items.legL)) {
-      jobs.push({ url: pairedPartUrl('legs', items.legL, 'L'), mesh: PART_MESH_NAMES.leg_L });
-    }
-    if (isEquippedId(items.legR)) {
-      jobs.push({ url: pairedPartUrl('legs', items.legR, 'R'), mesh: PART_MESH_NAMES.leg_R });
-    }
+    const wanted: Array<{ id: string; slot: NonNullable<BloxityItem['partSlot']> }> = [];
+    if (items.head) wanted.push({ id: items.head, slot: 'head' });
+    if (items.torso) wanted.push({ id: items.torso, slot: 'torso' });
+    const arms = items.armL || items.armR;
+    if (arms) wanted.push({ id: arms, slot: 'arms' });
+    const legs = items.legL || items.legR;
+    if (legs) wanted.push({ id: legs, slot: 'legs' });
 
     await Promise.all(
-      jobs.map(async ({ url, mesh }) => {
-        const target = skinned.find((candidate) => candidate.name === mesh);
-        if (!target) {
-          logger.warn(SCOPE, `base body has no mesh named ${mesh}`);
+      wanted.map(async ({ id, slot }) => {
+        const item = await describeItem(id);
+        if (!item?.assetPaths) {
+          logger.warn(SCOPE, `part ${id} is not in the catalogue - keeping the default ${slot}`);
           return;
         }
-        const geometry = await this.loadPart(url, target);
-        if (geometry) target.geometry = geometry;
+
+        await Promise.all(
+          PART_TARGETS[slot].map(async (target) => {
+            const path = item.assetPaths?.[target.path];
+            if (!path) return;
+
+            const mesh = skinned.find((candidate) => candidate.name === target.mesh);
+            if (!mesh) {
+              logger.warn(SCOPE, `base body has no mesh named ${target.mesh}`);
+              return;
+            }
+
+            const geometry = await this.loadPart(assetUrl(path), mesh);
+            if (geometry) mesh.geometry = geometry;
+          }),
+        );
       }),
     );
   }

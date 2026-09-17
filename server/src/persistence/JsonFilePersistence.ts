@@ -1,3 +1,4 @@
+import { sanitiseDisplayName } from '@moonwalk/shared';
 import {
   closeSync,
   existsSync,
@@ -73,7 +74,9 @@ export class JsonFilePersistence implements PersistenceAdapter {
           ownedTiers: numeric(value.ownedTiers),
           rebirths: numeric(value.rebirths),
           bestStage: numeric(value.bestStage),
-          displayName: text(value.displayName),
+          // Through the same filter a live name goes through: a save file
+          // is editable by anyone who can reach the disk.
+          displayName: sanitiseDisplayName(value.displayName),
           avatarUrl: text(value.avatarUrl),
           updatedAt: numeric(value.updatedAt),
         });

@@ -4,7 +4,6 @@ import { createAnimationInput, type AnimationInput } from '../animation/Animatio
 import { BloxityAvatar } from '../bloxity/BloxityAvatar.js';
 import { readAvatarLook } from '../net/readAvatarLook.js';
 import type { NetPlayerState } from '../net/netTypes.js';
-import { NamePlate } from './NamePlate.js';
 import { PlayerCharacter } from './PlayerCharacter.js';
 
 /** Seconds a remote transform is smoothed over. */
@@ -47,7 +46,15 @@ export class RemotePlayer {
 
   /** Their Bloxity cosmetics. The same class that dresses the local player. */
   private readonly avatar = new BloxityAvatar(this.character);
-  private readonly plate = new NamePlate(this.character.root);
+
+  /**
+   * Their Bloxity display name and portrait, as replicated.
+   *
+   * Held rather than drawn here: the plate is a screen-space chip owned by
+   * `Nameplates`, which reads this once per frame. See `ui/Nameplates.ts`.
+   */
+  displayName = '';
+  pfp = '';
 
   /** Latest authoritative transform, eased toward every frame. */
   private targetX = 0;
@@ -82,9 +89,10 @@ export class RemotePlayer {
 
   /** Copy the replicated fields in. Called on every patch for this player. */
   apply(state: NetPlayerState): void {
-    // Both of these no-op on an unchanged value, which is every patch but the
-    // handful where somebody signs in or changes a hat.
-    this.plate.setName(state.displayName);
+    this.displayName = state.displayName ?? '';
+    this.pfp = state.avatarUrl ?? '';
+    // No-ops on an unchanged look, which is every patch but the handful where
+    // somebody changes a hat.
     this.avatar.apply(readAvatarLook(state.avatar));
 
     this.targetX = state.x;
@@ -156,7 +164,6 @@ export class RemotePlayer {
   }
 
   dispose(): void {
-    this.plate.dispose();
     this.avatar.dispose();
     this.character.dispose();
   }

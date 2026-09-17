@@ -1,8 +1,8 @@
 import {
   BUNDLED_LOOK,
-  PLAYER_HEIGHT,
   isEquippedId,
   looksMatch,
+  temperProportion,
   type AvatarItems,
   type AvatarLook,
   type AvatarProportions,
@@ -23,51 +23,80 @@ import type { PlayerCharacter } from '../player/PlayerCharacter.js';
 import { logger } from '../util/logger.js';
 import { bloxityBodyFactory } from './BloxityBodyFactory.js';
 import {
-  BLOXITY_MODEL_HEIGHT,
-  DEFAULT_SKIN_ID,
-  resolveItemUrls,
-  resolveSkinUrl,
+  DEFAULT_SKIN_URL,
+  assetUrl,
+  describeItem,
+  peekItem,
 } from './bloxityAssets.js';
-
 
 const SCOPE = 'bloxity/avatar';
 
-/** World size of one unit of a Bloxity item, from the GLB's own scale. */
-const ITEM_WORLD_SCALE = PLAYER_HEIGHT / BLOXITY_MODEL_HEIGHT;
-/** The reference page's hat lift on the head bone, in GLB units. */
-const HAT_LIFT = 0.8;
-/** How far behind the chest a back item sits on the bundled body, in world units. */
-const FBX_BACK_OFFSET = -0.18;
+/*
+ * How an accessory is sized, and why there are two answers.
+ *
+ * A hat is a CHILD OF A BONE, so it already inherits everything above it - the
+ * body's own scale and every proportion written onto the bones. The right
+ * local scale is therefore the one the item was authored at, and nothing else:
+ * dividing by the anchor's WORLD scale (which is what this file used to do)
+ * cancels that inheritance and pins the hat to a fixed world size, so a small
+ * avatar wears a giant hat and a tall one wears a doll's. That is the
+ * model-space/world-space bug, and the fix is to stay in model space.
+ *
+ * Bloxity's body IS the rig these items were authored for, so it gets
+ * Bloxity's own numbers: scale 1, and a hat lifted 0.8 up the head bone, which
+ * is what their renderer parents it at. The bundled `player.fbx` is a
+ * different bone space and keeps the values tuned for it.
+ */
+/** An item's scale in the bundled body's bone space. */
+const FBX_ITEM_SCALE = 0.9;
+/** A hat sits this far up the head bone, on the bundled body. */
+const FBX_HAT_LIFT = 0.55;
+/** A back item sits this far behind the chest, on the bundled body. */
+const FBX_BACK_OFFSET = -0.35;
+/** Bloxity's own hat lift on their own body. */
+const BLOXITY_HAT_LIFT = 0.8;
+
+/**
+ * The multiplier a proportion actually applies.
+ *
+ * `temperProportion` lives in `shared/` with the reasoning and the bounds: a
+ * slider built for a viewer spans sizes a player cannot run a course at, so
+ * every value is scaled toward 1 and clamped. It is also what stops a zero, a
+ * NaN or a missing field ever reaching a scale.
+ */
+const temper = temperProportion;
 
 const SCRATCH = new Vector3();
 
 /**
- * Bloxity cosmetics on ONE character - local or remote, identically.
+ * One character's Bloxity appearance - local or remote, identically.
  *
  * Four things, each where it belongs:
  *
  *  - the BODY: `player.glb` with its parts swapped in, worn whenever Bloxity
- *    could describe this player at all. THE DEFAULT AVATAR IS BLOXITY'S, not
- *    ours: a player who never opened the customiser still has a Bloxity
- *    default - that body, wearing `skins/0.png` - and rendering this game's
- *    bundled character for them would be showing them somebody else's. The
- *    bundled body is the fallback for exactly one case: the SDK is blocked,
- *    offline or absent, or its base model could not be fetched;
- *  - the SKIN, as the body material's map;
- *  - the HAT and BACK item, parented to real bones so they follow the moonwalk;
- *  - the PROPORTIONS, as scales and offsets on bones. Never rotations:
- *    `PlayerRig` rebuilds every bone quaternion each frame, and a rotation
- *    written here would be gone before it was drawn.
+ *    could describe this player at all. THE DEFAULT AVATAR IS BLOXITY'S: a
+ *    player who never opened the customiser still has one, and it is that body
+ *    wearing `skins/0.png`. The bundled `player.fbx` is the fallback for the
+ *    SDK being blocked, offline or absent, or its base model unreachable;
+ *  - the SKIN, as the body material's map, from the catalogue's own path;
+ *  - the HAT and BACK item, parented to real bones so they follow the moonwalk,
+ *    at the scale they were authored at (see above);
+ *  - the PROPORTIONS, as scales and offsets on bones, relative to each bone's
+ *    REST value. Never rotations: `PlayerRig` rebuilds every bone quaternion
+ *    each frame, so a rotation written here would be gone before it was drawn.
  *
- * Every player in the room is dressed, not just the local one: a look is
- * replicated by the server, so `RemotePlayer` owns one of these too and feeds
- * it the record it was sent.
+ * Every player in the room gets one of these, fed from replicated state, so
+ * there is exactly one construction path and nobody can look different on
+ * their own screen to how they look on everybody else's.
  */
 export class BloxityAvatar {
   private readonly character: PlayerCharacter;
   private readonly objLoader = new OBJLoader();
   private readonly textureLoader = new TextureLoader();
 
+  /** The look as ASKED for, before a hat has had its say about the head. */
+  private requested: AvatarLook = BUNDLED_LOOK;
+  /** The look actually worn, after `forceHead`. */
   private look: AvatarLook = BUNDLED_LOOK;
 
   private bodyKey = '';
@@ -94,14 +123,20 @@ export class BloxityAvatar {
 
   /** Wear this look. Safe to call on every patch; unchanged slots do no work. */
   apply(look: AvatarLook): void {
-    if (this.disposed || looksMatch(look, this.look)) return;
-    this.look = look;
+    if (this.disposed) return;
+    this.requested = look;
+
+    const worn = this.forceHead(look);
+    if (looksMatch(worn, this.look) && this.bodyKey === (worn.bloxity ? bodyKeyOf(worn.items) : '')) {
+      return;
+    }
+    this.look = worn;
 
     // The body is worn for anyone Bloxity can describe, equipped or not.
-    const key = look.bloxity ? bodyKeyOf(look.items) : '';
+    const key = worn.bloxity ? bodyKeyOf(worn.items) : '';
     if (key !== this.bodyKey) {
       this.bodyKey = key;
-      void this.rebuildBody(look.bloxity);
+      void this.rebuildBody(worn.bloxity);
     }
     this.wearLayers();
   }
@@ -118,6 +153,44 @@ export class BloxityAvatar {
     this.attachments.clear();
     for (const texture of this.textures) texture.dispose();
     if (!this.wearingBloxityBodyMaterial) this.material?.dispose();
+  }
+
+  /**
+   * Let a hat override the head, the way the portal does.
+   *
+   * Bloxity applies `forceHeadId` when a hat is EQUIPPED - it writes the value
+   * straight into `headId` - so a look that came from the portal already obeys
+   * it. It is applied again here because a renderer should not depend on that:
+   * a look can reach this game from replicated state or from an account
+   * dressed before the hat declared the constraint, and in each of those a
+   * stale custom head is drawn INSIDE a helmet modelled around the stock one,
+   * which is exactly the "distorted avatar" players were seeing.
+   *
+   * An unknown hat is fetched and the look re-applied when it lands, rather
+   * than awaited: a hat nobody has seen before must not stall a player who is
+   * already on screen.
+   */
+  private forceHead(look: AvatarLook): AvatarLook {
+    const hatId = look.items.hat;
+    if (!hatId) return look;
+
+    const hat = peekItem(hatId);
+    if (hat === undefined) {
+      void describeItem(hatId).then(() => {
+        if (this.disposed || this.requested.items.hat !== hatId) return;
+        this.apply(this.requested);
+      });
+      return look;
+    }
+
+    const forced = hat?.forceHeadId;
+    if (forced === undefined || forced === null) return look;
+
+    // `'-1'` is Bloxity's "none", and none means the DEFAULT head - their
+    // renderer restores the stock geometry rather than hiding anything.
+    const head = isEquippedId(forced) ? forced : '';
+    if (head === look.items.head) return look;
+    return { ...look, items: { ...look.items, head } };
   }
 
   private async rebuildBody(wantsBody: boolean): Promise<void> {
@@ -144,8 +217,8 @@ export class BloxityAvatar {
 
     // Only a material this class cloned is its to dispose; a Bloxity body's is
     // owned by the body and goes with it in `PlayerCharacter.setModel`. The
-    // bundled body shares ONE material with every remote player, so it is
-    // cloned before anything writes to it.
+    // bundled body shares ONE material with every other default character, so
+    // it is cloned before anything writes to it.
     if (this.material && !this.wearingBloxityBodyMaterial) this.material.dispose();
     let material: MeshStandardMaterial | null = null;
     model.traverse((child) => {
@@ -168,25 +241,36 @@ export class BloxityAvatar {
   // ------------------------------------------------------------------ skin
 
   private async applySkin(): Promise<void> {
-    // Only the Bloxity body wears a Bloxity skin, and with none equipped it
-    // wears Bloxity's default rather than rendering white.
+    // Only the Bloxity body wears a Bloxity skin - the texture is UV-mapped
+    // for that body and would be garbage on the bundled one - and with none
+    // equipped it wears Bloxity's own default rather than rendering white.
     const wanted = this.wearingBloxityBody
       ? isEquippedId(this.look.items.skin)
         ? this.look.items.skin
-        : DEFAULT_SKIN_ID
+        : ''
       : null;
     if (wanted === this.currentSkin) return;
     this.currentSkin = wanted;
 
     const material = this.material;
     if (!material) return;
-    if (!wanted) {
+    if (wanted === null) {
       material.map = this.defaultMap;
       material.needsUpdate = true;
       return;
     }
 
-    const url = await resolveSkinUrl(wanted);
+    // The catalogue knows where a skin lives; nothing here guesses a path.
+    let url = DEFAULT_SKIN_URL;
+    if (wanted) {
+      const item = await describeItem(wanted);
+      const path = item?.assetPaths?.texture;
+      if (!path) {
+        logger.warn(SCOPE, `skin ${wanted} is not in the catalogue - wearing the default skin`);
+      } else {
+        url = assetUrl(path);
+      }
+    }
     // Still wanted, on the same body? Either may have changed while resolving.
     if (this.disposed || this.currentSkin !== wanted || this.material !== material) return;
 
@@ -203,13 +287,13 @@ export class BloxityAvatar {
         material.needsUpdate = true;
       },
       undefined,
-      () => logger.warn(SCOPE, `skin ${wanted} failed to load`),
+      () => logger.warn(SCOPE, `skin ${wanted || 'default'} failed to load`),
     );
   }
 
   // ----------------------------------------------------------------- items
 
-  private async applyItem(slot: 'hat' | 'back', id: string | null): Promise<void> {
+  private async applyItem(slot: 'hat' | 'back', id: string): Promise<void> {
     const wanted = isEquippedId(id) ? id : null;
     const current = slot === 'hat' ? this.currentHat : this.currentBack;
     if (wanted === current) return;
@@ -226,11 +310,20 @@ export class BloxityAvatar {
       return;
     }
 
+    // The catalogue knows where the item lives; an item it does not know is
+    // simply not worn, and the rest of the avatar is unaffected.
+    const item = await describeItem(wanted);
+    const meshPath = item?.assetPaths?.mesh;
+    const texturePath = item?.assetPaths?.texture;
+    if (!meshPath || !texturePath) {
+      logger.warn(SCOPE, `${slot} ${wanted} has no mesh in the catalogue - not worn`);
+      return;
+    }
+
     try {
-      const urls = await resolveItemUrls(slot, wanted);
       const [object, texture] = await Promise.all([
-        this.objLoader.loadAsync(urls.mesh),
-        this.textureLoader.loadAsync(urls.texture),
+        this.objLoader.loadAsync(assetUrl(meshPath)),
+        this.textureLoader.loadAsync(assetUrl(texturePath)),
       ]);
       const still = slot === 'hat' ? this.currentHat : this.currentBack;
       // `anchor.parent` is null once a body swap has taken this skeleton away.
@@ -248,22 +341,15 @@ export class BloxityAvatar {
         }
       });
 
-      /*
-       * Sized in WORLD terms, not bone terms.
-       *
-       * The two bodies do not share a bone space - `player.fbx` bones live in
-       * centimetres under a 0.01 root, the GLB's under its own - so a fixed
-       * local scale would be right on one body and invisible on the other.
-       * Dividing by the anchor's world scale gives both the size the item has
-       * on Bloxity's own renderer, converted to this game's units.
-       */
-      anchor.updateWorldMatrix(true, false);
-      const boneScale = anchor.getWorldScale(SCRATCH).y || 1;
-      object.scale.setScalar(ITEM_WORLD_SCALE / boneScale);
+      // MODEL space, not world space: the item is a child of the bone and
+      // inherits the body's scale and proportions with it, which is what makes
+      // a small avatar's hat small. See the note at the top of this file.
+      const native = this.wearingBloxityBody;
+      object.scale.setScalar(native ? 1 : FBX_ITEM_SCALE);
       if (slot === 'hat') {
-        object.position.set(0, (HAT_LIFT * ITEM_WORLD_SCALE) / boneScale, 0);
+        object.position.set(0, native ? BLOXITY_HAT_LIFT : FBX_HAT_LIFT, 0);
       } else {
-        object.position.set(0, 0, this.wearingBloxityBody ? 0 : FBX_BACK_OFFSET / boneScale);
+        object.position.set(0, 0, native ? 0 : FBX_BACK_OFFSET);
       }
 
       anchor.add(object);
@@ -276,38 +362,93 @@ export class BloxityAvatar {
   // ----------------------------------------------------------- proportions
 
   /**
-   * Proportions, after the reference page's viewer: height stretches the body
-   * vertically, arm length scales the arm bones, head scale scales the neck
-   * bone while undoing the height stretch on it, neck height lifts the head.
-   * Everything is relative to the bone's REST values, so the two bodies'
-   * different units never need a per-body constant.
+   * Proportions, as Bloxity's own renderer applies them.
+   *
+   * Taken from the shipped SDK rather than invented here - its viewer loop
+   * does exactly this, and a player who set their sliders in the portal should
+   * see the character they were shown there:
+   *
+   *   character.scale.set(1, height, 1)          // a vertical stretch
+   *   Neck1.scale   = rest * headScale, with y over height   // undo it
+   *   Neck_Offset.y = rest.y * (1 + height - headScale)      // keep the head on
+   *   Neck_Offset.y += bind.y * (neckHeight - 1) * 0.8
+   *   Arm*.scale.y  = rest.y * armLength
+   *
+   * Height being a Y stretch and not a uniform scale IS Bloxity's look, and
+   * the neck compensation is why it does not read as a stretched head.
+   *
+   * The three the SDK's in-page viewer does not render - `shoulderWidth`,
+   * `torsoScaleX`, `legOffsetX`, which it only feeds into the portrait hash -
+   * go to the bones that were plainly authored for them: the rig carries
+   * `ArmL_Offset`/`ArmR_Offset` at x = +/-2 and `LegL_Offset`/`LegR_Offset` at
+   * x = +/-0.6, so widening the shoulders and spreading the legs is those
+   * offsets scaled. Writing them onto `Spine2` instead - which is what this
+   * did before - stretched the whole torso mesh sideways, and on this rig the
+   * leg bones themselves sit at x = 0, so the spread did nothing at all.
+   *
+   * Two rules keep it working on BOTH bodies: everything is relative to the
+   * bone's REST value, so the rigs' different units need no per-body constant,
+   * and every slot falls back on its own - the bundled FBX has no `_Offset`
+   * bones, so shoulders and legs fall back to the bones it does have while
+   * everything else still applies.
    */
   private applyProportions(p: AvatarProportions): void {
-    const num = (value: number, fallback = 1): number =>
-      Number.isFinite(value) ? value : fallback;
-    const height = Math.max(0.05, num(p.height));
+    const height = temper(p.height, 'height');
+    const head = temper(p.headScale, 'headScale');
+    const arm = temper(p.armLength, 'armLength');
+    const neck = temper(p.neckHeight, 'neckHeight');
+    const shoulders = temper(p.shoulderWidth, 'shoulderWidth');
+    const torso = temper(p.torsoScaleX, 'torsoScaleX');
+    const spread = temper(p.legOffsetX, 'legOffsetX');
 
+    // HEIGHT, on the model and nowhere else. The body is fitted to this game
+    // exactly once, in the factory, and this multiplies that one figure - so
+    // there is no second place a scale is applied and nothing can double it.
     const model = this.character.modelRoot;
     const base = (model.userData['baseScale'] as number | undefined) ?? model.scale.x;
     model.userData['baseScale'] = base;
     model.scale.set(base, base * height, base);
 
-    this.scaleBone('Spine1', (rest, bone) => bone.scale.set(rest.x * num(p.torsoScaleX), rest.y, rest.z));
-    this.scaleBone('Spine2', (rest, bone) => bone.scale.set(rest.x * num(p.shoulderWidth), rest.y, rest.z));
+    // TORSO width.
+    this.scaleBone('Spine1', (rest, bone) => bone.scale.set(rest.x * torso, rest.y, rest.z));
+
+    // ARM length. On the upper arm only: the SDK scales every bone whose name
+    // starts with `Arm`, and because the forearm is a CHILD of the upper arm
+    // that compounds to the square of the figure - an arm three times as long
+    // becoming nine. Applying it once lands on the figure that was asked for.
     for (const name of ['ArmL1', 'ArmR1']) {
-      this.scaleBone(name, (rest, bone) => bone.scale.set(rest.x, rest.y * num(p.armLength), rest.z));
+      this.scaleBone(name, (rest, bone) => bone.scale.set(rest.x, rest.y * arm, rest.z));
     }
-    const head = num(p.headScale);
+
+    // SHOULDER width: the arm offsets, or the chest on a rig without them.
+    if (this.bones.has('ArmL_Offset') || this.bones.has('ArmR_Offset')) {
+      for (const name of ['ArmL_Offset', 'ArmR_Offset']) {
+        this.moveBone(name, (rest, bone) => {
+          bone.position.x = rest.x * shoulders;
+        });
+      }
+    } else {
+      this.scaleBone('Spine2', (rest, bone) => bone.scale.set(rest.x * shoulders, rest.y, rest.z));
+    }
+
+    // HEAD size, with the height stretch taken back out of it - Bloxity's own
+    // compensation, and the reason a tall avatar's head is not an egg.
     this.scaleBone('Neck1', (rest, bone) => {
       bone.scale.set(rest.x * head, (rest.y * head) / height, rest.z * head);
     });
-    this.moveBone('Neck1', (rest, bone) => {
-      bone.position.y = rest.y * (1 + (num(p.neckHeight) - 1) * 0.8);
+
+    // NECK height, on the offset the SDK writes it to, and carrying the head
+    // back to where the stretch and the head scale left it.
+    const neckNode = this.bones.has('Neck_Offset') ? 'Neck_Offset' : 'Neck1';
+    this.moveBone(neckNode, (rest, bone) => {
+      bone.position.y = rest.y * (1 + height - head) + rest.y * (neck - 1) * 0.8;
     });
-    // Leg spread, proportional to how far each hip already sits off the centre.
-    for (const name of ['LegL1', 'LegR1']) {
+
+    // LEG spread: the hip offsets, or the leg bones on a rig without them.
+    const legs = this.bones.has('LegL_Offset') ? ['LegL_Offset', 'LegR_Offset'] : ['LegL1', 'LegR1'];
+    for (const name of legs) {
       this.moveBone(name, (rest, bone) => {
-        bone.position.x = rest.x * (1 + (num(p.legOffsetX) - 1) * 0.5);
+        bone.position.x = rest.x * spread;
       });
     }
   }
@@ -324,6 +465,15 @@ export class BloxityAvatar {
     if (!bone) return;
     bone.userData['restPosition'] ??= bone.position.clone();
     write(bone.userData['restPosition'] as Vector3, bone);
+  }
+
+  /** Where a nameplate should float, in world units above the character's feet. */
+  headHeight(): number {
+    const neck = this.bones.get('Neck1');
+    if (!neck) return 0;
+    neck.updateWorldMatrix(true, false);
+    neck.getWorldPosition(SCRATCH);
+    return SCRATCH.y - this.character.root.position.y;
   }
 }
 

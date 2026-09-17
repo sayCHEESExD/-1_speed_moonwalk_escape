@@ -151,6 +151,69 @@ export const sanitiseAvatarLook = (value: unknown): AvatarLook => {
   return { bloxity: source.bloxity === true, items, proportions };
 };
 
+/**
+ * How far a proportion is allowed to move a character, and where it stops.
+ *
+ * Bloxity's sliders are built for a viewer where nothing has to run a course:
+ * `height` alone spans 0.5 to 1.6, which is a player a third the size of the
+ * one standing beside them. Rendering those literally is what put microscopic
+ * and gigantic players on the carpet.
+ *
+ * So every proportion is TEMPERED rather than either ignored or obeyed
+ * blindly: the deviation from 1 is scaled by an influence, then clamped.
+ * Everyone keeps their own build, the differences between two avatars stay
+ * visible and in the same ORDER Bloxity's own viewer shows them in, and every
+ * player stays a size this game's camera, collision box and nameplates can
+ * work with.
+ *
+ * It lives in `shared/` because it is the rule that decides whether a player
+ * is physically usable, and `verify:progression` asserts the bounds hold for
+ * every value a slider can produce - including the ones a hostile client can
+ * send.
+ */
+export const PROPORTION_TEMPER: Readonly<
+  Record<keyof AvatarProportions, { readonly influence: number; readonly min: number; readonly max: number }>
+> = {
+  height: { influence: 0.55, min: 0.75, max: 1.3 },
+  headScale: { influence: 0.8, min: 0.6, max: 1.8 },
+  armLength: { influence: 0.8, min: 0.4, max: 1.8 },
+  // Tempered harder than the rest: shoulder width moves the arm OFFSETS, and
+  // past about a third wider the arms visibly leave the chest behind. The
+  // alternative - scaling the chest bone, which the arms hang off - widens the
+  // head with them, because the neck hangs off it too.
+  shoulderWidth: { influence: 0.6, min: 0.7, max: 1.35 },
+  torsoScaleX: { influence: 1, min: 0.4, max: 1.8 },
+  neckHeight: { influence: 0.8, min: 0.9, max: 1.25 },
+  legOffsetX: { influence: 0.35, min: 0.4, max: 2.2 },
+};
+
+/**
+ * The multiplier actually applied for one proportion.
+ *
+ * Also the last guard against a malformed value ever reaching a scale: a
+ * zero, a negative, a NaN or a missing field all resolve to 1 rather than
+ * collapsing a character to a point or turning its matrix into NaNs - which
+ * in three.js does not throw, it simply stops drawing the player.
+ */
+export const temperProportion = (
+  value: number | undefined,
+  key: keyof AvatarProportions,
+): number => {
+  const { influence, min, max } = PROPORTION_TEMPER[key];
+  /*
+   * Only a NON-NUMBER falls back to 1.
+   *
+   * Zero and negatives are put through the same arithmetic and land on `min`,
+   * which is what makes the curve MONOTONIC: a bigger slider value is never a
+   * smaller character. Treating them as 1 instead - which this did at first -
+   * puts a step in the middle of `legOffsetX`, whose own range legitimately
+   * starts below zero. `min` is comfortably above zero for every proportion,
+   * so nothing here can collapse a character however the number arrived.
+   */
+  const raw = typeof value === 'number' && Number.isFinite(value) ? value : 1;
+  return Math.min(max, Math.max(min, 1 + (raw - 1) * influence));
+};
+
 /** Whether two looks would draw the same character. */
 export const looksMatch = (a: AvatarLook, b: AvatarLook): boolean => {
   if (a.bloxity !== b.bloxity) return false;

@@ -600,6 +600,65 @@ body.mwe-touch-mode .mwe-account__name { max-width: 30vw; }
   cursor: not-allowed;
 }
 
+/* ---- Nameplates --------------------------------------------------------- */
+/*
+ * The name chips over every player's head, positioned by Nameplates after
+ * each render. The script writes only a transform and a z-index; everything
+ * else is here.
+ *
+ * BELOW every piece of HUD in the stacking order, so a crowd of players can
+ * never cover a figure the player needs to read.
+ */
+.mwe-plates {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 18;
+}
+.mwe-plate {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px 2px 2px;
+  border-radius: 999px;
+  background: rgba(12, 8, 24, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  /* Scaled toward the head it hangs over, not away from it. */
+  transform-origin: 50% 100%;
+  white-space: nowrap;
+  will-change: transform;
+}
+.mwe-plate[hidden] { display: none; }
+.mwe-plate--bare { padding: 3px 10px; }
+.mwe-plate__pfp {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: rgba(255, 255, 255, 0.16);
+  flex: none;
+}
+.mwe-plate__pfp[hidden] { display: none; }
+.mwe-plate__name {
+  font-family: system-ui, "Segoe UI", Roboto, sans-serif;
+  font-weight: 700;
+  font-size: 13px;
+  line-height: 1.25;
+  color: #ffffff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85);
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (max-width: 720px) {
+  .mwe-plate__pfp { width: 18px; height: 18px; }
+  .mwe-plate__name { font-size: 12px; max-width: 120px; }
+}
+
 /* ---- Speed-gain popups -------------------------------------------------- */
 /*
  * Deliberately BELOW the HUD in the stacking order (the bar is 20, the rail 21,

@@ -188,10 +188,21 @@ This is the whole game, so it gets its own section.
   session id for networking, the Bloxity account id for Bux - all still exist
   and none of them is ever DRAWN. Someone with no Bloxity identity is
   `GUEST_NAME`, which is deliberately not unique and deliberately not invented.
-- **The name is the SERVER's answer, never the client's.** `displayName` and
-  `avatarUrl` on `PlayerState` are written only from a profile
-  `verifyBloxityToken` resolved. A name a client could assert is a name it
-  could borrow, and it would be borrowed onto a leaderboard.
+- **The name is what the PORTAL says, sent by the client.** `SetIdentity`
+  carries a display name and a portrait; the server sanitises both
+  (`sanitiseDisplayName`, `sanitisePfpUrl`) and replicates them, and that is
+  the only path either field is written by. Requiring a server-VERIFIED name
+  was tried and is what shipped every signed-in player as a guest: there is no
+  server-to-server route that answers "who owns this socket", so insisting on
+  one meant nobody ever got their name. It is acceptable for the same reason a
+  look is - a name decides nothing, it chooses text on a sign. The token is
+  still verified server-side and still governs the one thing worth money: who
+  a Bux grant belongs to.
+- `displayName` is empty for a guest and for anyone signed out, and every
+  display falls back to `GUEST_NAME` itself rather than the server inventing a
+  name. The SDK's random guest nickname is NOT an identity - it changes when
+  the browser is cleared - so `identityFromLegion` treats a guest as signed out
+  for the name while keeping their portrait, which is really theirs.
 - The boards are keyed by the player ID and shown by the name. Those are two
   jobs: display names are NOT unique - two people really can both be "Chicken
   877" - so keying on one would silently merge their totals.
@@ -199,7 +210,21 @@ This is the whole game, so it gets its own section.
   A look travels as `AvatarLook` (`shared/src/config/avatar.ts`) - nine slots,
   seven proportions, and the `bloxity` flag - and `RemotePlayer` owns a
   `BloxityAvatar` of its own, so the character moonwalking past is wearing what
-  its owner actually chose.
+  its owner actually chose. ONE construction path for local and remote alike:
+  two would be how a player ends up looking different on their own screen to
+  how they look on everybody else's.
+- **NOTHING builds an asset URL out of an id.** `describeItem` reads the item's
+  own `assetPaths` from Bloxity's public catalogue and they are used verbatim;
+  an item the catalogue does not know is simply not worn, and only that slot
+  falls back. The id-pattern version of `bloxityAssets.ts` was right for most
+  items and silently wrong for the rest, and a 404 for a part is an avatar
+  missing an arm. Arms and legs are ONE item carrying `meshL` and `meshR`, not
+  two ids with a `_L`/`_R` suffix.
+- **A hat may force the head** (`forceHeadId`, `'-1'` meaning the stock one).
+  Bloxity's customiser applies it on equip and its renderer applies it again;
+  so does `BloxityAvatar.forceHead`, because a look reaching this game from
+  replicated state has not been through the customiser. A custom head left
+  under a helmet modelled around the stock one is the "distorted avatar" bug.
 - **The look is the ONE message whose contents the server replicates rather
   than decides**, and that is safe for exactly one reason: it is pure
   presentation with nothing to win by lying about. The server cannot ask
@@ -225,9 +250,28 @@ This is the whole game, so it gets its own section.
   rebinds `PlayerRig` and the moonwalk drives it unchanged. The swap happens
   INSIDE `visual`, under the `facing` half-turn, so the moonwalk offset is
   untouched.
-- Hat/back items are sized by the anchor bone's WORLD scale, because the two
-  bodies' bone spaces differ; proportions are applied relative to each bone's
-  rest scale/position, never as rotations (`PlayerRig` owns rotations).
+- **Accessories are sized in MODEL space, never world space.** A hat is a
+  child of a bone and already inherits the body's scale and every proportion
+  above it, so its local scale is the one it was authored at: 1 on Bloxity's
+  body (the rig these items are made for, hat lifted 0.8 up the head bone) and
+  the tuned figures on the bundled FBX. Dividing by the anchor's WORLD scale -
+  which this did once - cancels that inheritance and pins the hat to a fixed
+  world size, so a small avatar wears a giant hat.
+- **Height is applied ONCE, uniformly, on top of the model's own `baseScale`.**
+  The body is fitted to this game in exactly one place
+  (`BloxityBodyFactory.loadPrototype`) and the height multiplier goes on top of
+  it; scaling the root and the parts both is a double scaling, and scaling Y
+  alone is a stretched character rather than a tall one.
+- **Proportions are TEMPERED, not obeyed literally** (`temperProportion` in
+  `shared/src/config/avatar.ts`). Bloxity's sliders span sizes a viewer can
+  show and a course cannot be run at - `height` alone runs 0.5 to 1.6 - so each
+  deviation from 1 is scaled by an influence and clamped. Every avatar keeps
+  its own build and the ORDER is preserved (a taller avatar is still taller);
+  nobody ends up microscopic, gigantic, or - through a zero, a NaN or a missing
+  field - scaled to nothing. `verify:bloxity` asserts all of that.
+- Bone proportions are applied relative to each bone's REST scale/position, so
+  the two rigs' different units never need a per-body constant, and never as
+  rotations (`PlayerRig` owns rotations).
 
 ## Rewards, stages and the finish line
 
@@ -488,12 +532,23 @@ across the upper middle. Speed-gain popups float over the centre.
   cannot leave the game permanently suppressed.
 - **Speed-gain popups** are driven by an ACCUMULATOR over the replicated total,
   never by raw patches, and the pool is a HARD CEILING allocated once.
-- **Names are drawn by `NamePlate`, one per character, local player included.**
-  A sprite on the character's `root` - above the moonwalk half-turn, the death
-  tip-over and the height proportion, so it never mirrors, keels over or grows.
-  It draws `displayName` and nothing when that is empty: a blank plate is the
-  honest answer for a player the server has not verified, and a placeholder
-  there would read as somebody's name.
+- **Names are drawn by `Nameplates`, one chip per player, local included.**
+  DOM over the canvas, not geometry in it, and that is what keeps a plate
+  readable: a plate in the world scales with the avatar under it, so Bloxity's
+  smallest height would carry a name nobody could read. These are projected
+  from the player's NECK JOINT after the render - so the plate sits where that
+  player's own head actually is - and sized by camera distance alone, so every
+  plate is the same size on screen whatever the body beneath it is built like.
+  One plate per session id, removed the frame its player stops being drawn, so
+  a rejoin or a body swap cannot leave a second one behind.
+- Plates show the REPLICATED name, the local player's included, so the name
+  over your own head cannot disagree with the one everybody else sees.
+- **There is no Log out button in the Bloxity panel.** Signing out is the
+  portal's to offer: doing it from in here costs a player their name, their
+  avatar and any purchase in flight, inside a game they meant to close a panel
+  in. Nothing about authentication changed - the SDK still reports a portal
+  logout through the one `onUserChanged` - there is simply no button that calls
+  it.
 - **Every menu must be reachable with a mouse.** Every panel opens from a rail
   tile AND has a key (R, U, M, Escape). A key PRESSES THE BUTTON rather than
   doing the same thing as the button, so the two paths cannot drift.
@@ -514,9 +569,13 @@ generated with confidence:
   tapers instead of running away.
 - `verify:bloxity` - the Bux webhook: unsigned and wrongly-signed deliveries are
   refused, a server with no secret refuses, retries pay once, unknown SKUs are
-  2xx with no grant, and the queue survives a restart. Also the two things an
+  2xx with no grant, and the queue survives a restart. Also everything an
   identity decides: a look off the wire is clamped and laundered (a traversal
-  or a `javascript:` id never becomes a CDN URL), and a board row shows a
+  or a `javascript:` id never becomes a CDN URL); every slider value a player
+  or a hostile client can send lands inside the playable size band, in order,
+  and never at zero; a name is bounded and stripped of markup and
+  bidirectional overrides while a non-Latin one survives intact; a portrait
+  from anywhere but Bloxity's own origin is refused; and a board row shows a
   Bloxity display name - never an id, never a generated handle - with two
   players sharing a name still two rows.
 - `verify:services` - the server's own decisions, exercised without a server:

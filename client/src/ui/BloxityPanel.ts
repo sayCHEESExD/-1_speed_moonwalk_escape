@@ -166,11 +166,21 @@ export class BloxityPanel {
     const actions = document.createElement('div');
     actions.className = 'mwe-account__actions';
     const friendsLabel = this.friendCount === null ? 'Friends' : `Friends (${this.friendCount})`;
+    /*
+     * No LOG OUT button, deliberately.
+     *
+     * Signing out is the portal's to offer, not this game's: a player who
+     * leaves the session here loses their name, their avatar and any Bux they
+     * are mid-purchase on, inside a game they only meant to close a panel in.
+     * Nothing about authentication changed - `Bloxity.logout()` still exists
+     * and the SDK still fires `onUserChanged` when the portal signs somebody
+     * out - there is simply no button in here that calls it. The row is a flex
+     * with a gap, so removing the button removes its space with it.
+     */
     actions.append(
       this.button(friendsLabel, 'mwe-account__btn', () => void this.openFriends()),
       this.button('Avatar', 'mwe-account__btn', () => this.openAvatar()),
       this.button('Bux', 'mwe-account__btn', () => void this.openBux()),
-      this.button('Log out', 'mwe-account__btn', () => this.bloxity.logout()),
     );
 
     this.chip.append(row, actions);

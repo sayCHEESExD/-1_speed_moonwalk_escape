@@ -74,6 +74,13 @@ export const MessageType = {
    * win by lying about a hat - so it is taken, clamped, and passed on.
    */
   AvatarLook: 'avatarLook',
+  /**
+   * Client -> server: "this is who I am in the portal" - display name and
+   * portrait. Sent on join and whenever the portal reports a login or logout.
+   * Accepted on the same terms as a look, and for the same reason: a name
+   * decides nothing. See `shared/src/types/identity.ts`.
+   */
+  SetIdentity: 'setIdentity',
 } as const;
 
 export type MessageType = (typeof MessageType)[keyof typeof MessageType];

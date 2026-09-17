@@ -4,6 +4,7 @@ import {
   type AvatarLook,
   type AvatarLookMessage,
   type BloxityIdentityMessage,
+  type SetIdentityMessage,
   type BuyUpgradeMessage,
   type ClaimStageMessage,
   type MoveMessage,
@@ -102,6 +103,8 @@ export class NetworkClient {
   private identity: (() => string | null) | null = null;
   /** The local player's appearance, re-sent on every (re)join. */
   private look: AvatarLook | null = null;
+  /** The local player's portal identity, re-sent on every (re)join. */
+  private identityMessage: SetIdentityMessage | null = null;
   private status: ConnectionStatus = 'idle';
 
   constructor(handlers: NetworkHandlers = {}) {
@@ -113,10 +116,28 @@ export class NetworkClient {
     this.identity = provider;
   }
 
-  /** Tell the room about a login or logout that happened after joining. */
-  sendIdentity(token: string | null): void {
+  /**
+   * Tell the room about a login or logout that happened after joining.
+   *
+   * The TOKEN, which the server verifies with Bloxity. It decides one thing
+   * only - which account a Bux purchase is granted to - and is never what
+   * anybody is named by.
+   */
+  sendBloxityToken(token: string | null): void {
     const message: BloxityIdentityMessage = { token: token ?? '' };
     this.room?.send(MessageType.BloxityIdentity, message);
+  }
+
+  /**
+   * Tell the room who the portal says this player is.
+   *
+   * Remembered, and re-sent on the next join: an identity that arrived while
+   * the socket was down would otherwise leave this player nameless to
+   * everybody else until their next portal event.
+   */
+  sendIdentity(identity: SetIdentityMessage): void {
+    this.identityMessage = identity;
+    this.room?.send(MessageType.SetIdentity, identity);
   }
 
   /**
@@ -185,9 +206,13 @@ export class NetworkClient {
           playerId,
           // Optional. Verified by the server with Bloxity, never trusted as-is.
           bloxityToken: this.identity?.() ?? undefined,
+          // Who the portal says this is, so a player has their name from the
+          // first patch rather than from their next portal event.
+          identity: this.identityMessage ?? undefined,
         });
         // Whatever this player looks like, said again on the new socket.
         if (this.look) this.room.send(MessageType.AvatarLook, this.look satisfies AvatarLookMessage);
+        if (this.identityMessage) this.room.send(MessageType.SetIdentity, this.identityMessage);
         break;
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);

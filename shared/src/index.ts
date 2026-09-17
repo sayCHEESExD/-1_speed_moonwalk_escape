@@ -16,6 +16,7 @@ export * from './config/rebirth.js';
 export * from './config/speed.js';
 export * from './config/upgrades.js';
 export * from './types/math.js';
+export * from './types/identity.js';
 export * from './types/messages.js';
 export * from './types/player.js';
 export * from './sim/WorldCollision.js';

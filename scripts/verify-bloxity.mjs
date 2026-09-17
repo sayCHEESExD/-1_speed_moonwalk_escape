@@ -19,7 +19,16 @@
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { sanitiseAvatarLook, GUEST_NAME } from '../shared/dist/index.js';
+import {
+  sanitiseAvatarLook,
+  sanitiseDisplayName,
+  sanitisePfpUrl,
+  temperProportion,
+  PROPORTION_RANGES,
+  PROPORTION_TEMPER,
+  DISPLAY_NAME_MAX,
+  GUEST_NAME,
+} from '../shared/dist/index.js';
 import { BuxGrants, SKU_WINS } from '../server/dist/bloxity/BuxGrants.js';
 import { processBuxWebhook } from '../server/dist/bloxity/buxWebhook.js';
 
@@ -194,6 +203,72 @@ console.log('\nwho a board names\n');
   check('signing out does not wipe the name the board already knew', afterLogout.wins[0].name === 'Disco Fox');
 
   rmSync(process.env.MOONWALK_DATA_DIR, { recursive: true, force: true });
+}
+
+
+console.log('\nproportions a player can actually run in\n');
+{
+  // Bloxity's sliders span sizes a viewer can show and a course cannot be run
+  // at. Every value one can produce - and every value a hostile client can
+  // send instead - has to land inside the playable band.
+  const hostile = [0, -0, -1, -1e9, 1e9, Number.NaN, Number.POSITIVE_INFINITY, undefined, null];
+  let worstLow = Infinity;
+  let worstHigh = 0;
+  let outOfBand = 0;
+  let notOrdered = 0;
+
+  for (const [key, range] of Object.entries(PROPORTION_RANGES)) {
+    const band = PROPORTION_TEMPER[key];
+    const samples = [];
+    for (let i = 0; i <= 40; i += 1) samples.push(range[0] + ((range[1] - range[0]) * i) / 40);
+
+    let previous = -Infinity;
+    for (const value of samples) {
+      const applied = temperProportion(value, key);
+      if (!(applied >= band.min && applied <= band.max)) outOfBand += 1;
+      if (applied < previous - 1e-9) notOrdered += 1;
+      previous = applied;
+      worstLow = Math.min(worstLow, applied);
+      worstHigh = Math.max(worstHigh, applied);
+    }
+
+    for (const value of hostile) {
+      const applied = temperProportion(value, key);
+      if (!Number.isFinite(applied) || applied < band.min || applied > band.max) outOfBand += 1;
+    }
+  }
+
+  check('every slider value lands inside its playable band', outOfBand === 0, `${outOfBand} escaped`);
+  check('a bigger slider value is never a smaller character', notOrdered === 0);
+  check('nothing can make a player microscopic', worstLow >= 0.4, `smallest ${worstLow}`);
+  check('nothing can make a player gigantic', worstHigh <= 2.2, `largest ${worstHigh}`);
+  check('NaN and undefined resolve to the default scale', [Number.NaN, undefined, 'x'].every((v) => temperProportion(v, 'height') === 1));
+  check('a zero scale is clamped to the smallest playable size, never to zero', temperProportion(0, 'height') === PROPORTION_TEMPER.height.min);
+  check('the DEFAULT avatar is left exactly alone', Object.keys(PROPORTION_RANGES).every((key) => temperProportion(1, key) === 1));
+  check(
+    'a tall avatar is still taller than a short one',
+    temperProportion(1.6, 'height') > temperProportion(1, 'height') && temperProportion(1, 'height') > temperProportion(0.5, 'height'),
+  );
+}
+
+console.log('\nwho the portal says a player is\n');
+{
+  check('a plain display name survives', sanitiseDisplayName('Chicken 877') === 'Chicken 877');
+  check('a non-Latin name survives', sanitiseDisplayName('中文名字') === '中文名字');
+  check('markup and control characters are stripped', sanitiseDisplayName('<b>Chicken</b>') === 'bChickenb');
+  check('a bidirectional override cannot be used to impersonate', !sanitiseDisplayName('Chicken\u202e877').includes('\u202e'));
+  check('a name is bounded in characters', sanitiseDisplayName('x'.repeat(200)).length === DISPLAY_NAME_MAX);
+  check('a signed-out player sanitises to nothing at all', sanitiseDisplayName(undefined) === '' && sanitiseDisplayName('') === '');
+  check(`which the boards show as "${GUEST_NAME}"`, GUEST_NAME === 'Guest');
+
+  check(
+    'a Bloxity portrait survives',
+    sanitisePfpUrl('https://static.bloxity.io/img/pfps/3.png?width=128') === 'https://static.bloxity.io/img/pfps/3.png?width=128',
+  );
+  check('a portrait from anywhere else is refused', sanitisePfpUrl('https://example.com/x.png') === '');
+  check('a lookalike host is refused', sanitisePfpUrl('https://static.bloxity.io.example.com/x.png') === '');
+  check('a javascript: portrait is refused', sanitisePfpUrl('javascript:alert(1)') === '');
+  check('a portrait carrying quotes or spaces is refused', sanitisePfpUrl('https://static.bloxity.io/a b".png') === '');
 }
 
 console.log(`\n${failures === 0 ? 'bloxity verified' : `${failures} FAILURE(S)`}\n`);

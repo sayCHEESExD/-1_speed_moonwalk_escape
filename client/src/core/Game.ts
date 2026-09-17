@@ -1,4 +1,5 @@
 import {
+  GUEST_NAME,
   stageAt,
   type AvatarLook,
   type RespawnMessage,
@@ -9,6 +10,7 @@ import { AudioManager } from '../audio/AudioManager.js';
 import { PlayerAudio } from '../audio/PlayerAudio.js';
 import { Bloxity } from '../bloxity/Bloxity.js';
 import { BloxityAvatar } from '../bloxity/BloxityAvatar.js';
+import { identityFromLegion } from '../bloxity/identity.js';
 import { ThirdPersonCamera } from '../camera/ThirdPersonCamera.js';
 import { clientConfig } from '../config/clientConfig.js';
 import { Guard } from '../guard/Guard.js';
@@ -16,7 +18,6 @@ import { InputManager } from '../input/InputManager.js';
 import { NetworkClient } from '../net/NetworkClient.js';
 import type { ConnectionStatus, NetPlayerState } from '../net/netTypes.js';
 import { LocalPlayer } from '../player/LocalPlayer.js';
-import { NamePlate } from '../player/NamePlate.js';
 import { playerModelLoader, type PlayerModelReport } from '../player/PlayerModelLoader.js';
 import { RemotePlayerManager } from '../player/RemotePlayerManager.js';
 import { RunController } from '../progression/RunController.js';
@@ -24,6 +25,7 @@ import { RendererManager } from '../rendering/RendererManager.js';
 import { SceneManager } from '../rendering/SceneManager.js';
 import { BloxityPanel } from '../ui/BloxityPanel.js';
 import { MonsterWarning } from '../ui/MonsterWarning.js';
+import { Nameplates } from '../ui/Nameplates.js';
 import { Panel, anyPanelOpen } from '../ui/Panel.js';
 import { RailButton } from '../ui/RailButton.js';
 import { RebirthPanel } from '../ui/RebirthPanel.js';
@@ -129,8 +131,20 @@ export class Game {
   /** The latest look, held until the character is built. */
   /** A look that arrived before there was a character to put it on. */
   private pendingLook: AvatarLook | null = null;
-  /** The local player's own name, over their own character. */
-  private plate: NamePlate | null = null;
+
+  /** The name chips over every player's head, the local one included. */
+  private readonly nameplates: Nameplates;
+  /**
+   * The local player's name and portrait, as the SERVER echoed them back.
+   *
+   * Read off replicated state rather than from the SDK directly, so the plate
+   * over your own head says exactly what everybody else's screen says about
+   * you - including the sanitising the server applied.
+   */
+  private localName = '';
+  private localPfp = '';
+  /** The identity last sent, so an unchanged one is not re-sent every frame. */
+  private lastIdentity = '';
   /** Remote players already announced to Bloxity, so a name is toasted once. */
   private readonly announced = new Set<string>();
   private joinedAt = 0;
@@ -173,6 +187,7 @@ export class Game {
     injectHudStyles();
     this.renderer = new RendererManager(container);
     this.remotePlayers = new RemotePlayerManager(this.sceneManager.scene);
+    this.nameplates = new Nameplates(container);
     this.hud = new SpeedHud(container);
     this.pops = new SpeedPopups(container);
     this.wins = new WinsCounter(container);
@@ -232,7 +247,12 @@ export class Game {
     window.addEventListener('mousedown', this.onGesture);
     window.addEventListener('touchstart', this.onGesture, { passive: true });
 
-    this.renderer.onResize((width, height) => this.camera.setViewport(width, height));
+    this.renderer.onResize((width, height) => {
+      this.camera.setViewport(width, height);
+      // Handed in rather than measured per frame, so placing plates never
+      // forces a layout.
+      this.nameplates.setViewport(width, height);
+    });
 
     this.network = new NetworkClient({
       onStatusChange: (status) => this.onStatusChange(status),
@@ -291,9 +311,19 @@ export class Game {
         this.network.sendAvatarLook(look);
         this.bloxityPanel.refreshAvatar();
       },
-      // A login or logout after joining. Before joining this is a no-op and
-      // the join itself carries the token.
-      identityChanged: (_user, token) => this.network.sendIdentity(token),
+      /*
+       * A login or logout after joining.
+       *
+       * Two separate things travel, because they answer two different
+       * questions. The TOKEN goes to the server to be verified, and decides
+       * only who a Bux purchase belongs to. The NAME and PORTRAIT go as a
+       * plain identity, which the server sanitises and replicates - that is
+       * what every nameplate and every board row shows.
+       */
+      identityChanged: (user, token) => {
+        this.network.sendBloxityToken(token);
+        this.syncIdentity(user);
+      },
     });
     this.network.setIdentityProvider(() => this.bloxity.getToken());
     this.bloxityPanel = new BloxityPanel(container, this.bloxity);
@@ -413,11 +443,12 @@ export class Game {
      * texture for the whole session.
      */
     this.bloxityAvatar = new BloxityAvatar(this.localPlayer.character);
-    this.plate = new NamePlate(this.localPlayer.character.root);
     const look = this.pendingLook ?? this.bloxity.getLook();
     this.pendingLook = null;
     this.bloxityAvatar.apply(look);
     this.network.sendAvatarLook(look);
+    // Who the portal already says this is, ready to travel with the join.
+    this.syncIdentity();
 
     logger.info(SCOPE, 'world ready');
     return this.modelReport;
@@ -511,6 +542,8 @@ export class Game {
     this.tickFps(delta);
 
     this.renderer.renderer.render(this.sceneManager.scene, this.camera.camera);
+    // After the render, from the matrices it just computed - see Nameplates.
+    this.updateNameplates();
   }
 
   /** The `show_fps` readout, averaged over half a second so it is readable. */
@@ -611,6 +644,42 @@ export class Game {
     this.camera.snapTo(player.position, placement === 'respawn');
   }
 
+  /**
+   * Send the portal identity if it differs from what was last sent.
+   *
+   * Called on every login and logout and once at start-up, never per frame.
+   * `getUser()` is asked each time rather than a cached user being kept, which
+   * is the SDK's own rule for this.
+   */
+  private syncIdentity(user = this.bloxity.getUser()): void {
+    const identity = identityFromLegion(user);
+    const key = `${identity.name}\u0000${identity.pfp}`;
+    if (key === this.lastIdentity) return;
+    this.lastIdentity = key;
+    this.network.sendIdentity(identity);
+  }
+
+  /**
+   * Every player's plate, local included, from replicated names only.
+   *
+   * Replicated rather than local, even for the local player: one source means
+   * the name over your own head cannot disagree with the one everybody else
+   * sees. A player the server has no name for shows `GUEST_NAME`, the same
+   * word the boards use for them.
+   */
+  private updateNameplates(): void {
+    const plates = this.nameplates;
+    plates.begin(this.camera.camera);
+    const player = this.localPlayer;
+    if (player) {
+      plates.put('local', player.character, this.localName || GUEST_NAME, this.localPfp);
+    }
+    for (const [sessionId, remote] of this.remotePlayers.entries()) {
+      plates.put(sessionId, remote.character, remote.displayName || GUEST_NAME, remote.pfp);
+    }
+    plates.end();
+  }
+
   private onPlayerAdded(sessionId: string, state: NetPlayerState): void {
     if (sessionId === this.localSessionId) {
       this.applyLocalState(state);
@@ -657,10 +726,11 @@ export class Game {
     const player = this.localPlayer;
     if (!player) return;
 
-    // The server's verified answer to who this is - the same field every other
-    // client reads for this player, so nobody sees a different name to anybody
-    // else, this player included.
-    this.plate?.setName(state.displayName);
+    // The server's own copy of this player's identity, sanitised - the same
+    // field every other client reads for them, so the plate over your head
+    // says what everybody else's screen says.
+    this.localName = state.displayName ?? '';
+    this.localPfp = state.avatarUrl ?? '';
 
     player.setMovementProfile(state.moveMultiplier, state.jumpVelocity);
 
@@ -778,7 +848,7 @@ export class Game {
     this.rebirthPanel.dispose();
     this.upgradePanel.dispose();
     this.bloxityPanel.dispose();
-    this.plate?.dispose();
+    this.nameplates.dispose();
     this.bloxityAvatar?.dispose();
     this.bloxity.dispose();
     this.fpsReadout.remove();
